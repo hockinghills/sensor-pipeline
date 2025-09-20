@@ -1,0 +1,13 @@
+[Unit]
+Description=HiveMQ Edge MQTT Broker Container
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName=hivemq
+Image=docker.io/hivemq/hivemq-edge:latest
+PublishPort=1883:1883
+Volume=%h/sensor-pipeline/data/hivemq:/opt/hivemq/data:Z
+
+[Install]
+WantedBy=default.target
