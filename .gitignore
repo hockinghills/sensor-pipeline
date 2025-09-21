@@ -1,0 +1,19 @@
+# Ignore sensitive files
+configs/influxdb_token.txt
+*.log
+*.pid
+
+# Ignore backup archives
+*.tar.gz
+*.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

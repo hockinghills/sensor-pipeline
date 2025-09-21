@@ -1,0 +1,18 @@
+[Unit]
+Description=Telegraf Data Collection Agent
+After=influxdb.service
+Requires=influxdb.service
+
+[Container]
+ContainerName=telegraf
+Image=docker.io/library/telegraf:latest
+Network=host
+Volume=%h/sensor-pipeline/configs/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+PodmanArgs=--privileged
+
+[Service]
+ExecStartPre=/bin/bash -c 'modprobe bme680_i2c || true'
+ExecStartPre=/bin/bash -c 'echo "bme680 0x77" > /sys/bus/i2c/devices/i2c-1/new_device || true'
+
+[Install]
+WantedBy=default.target
