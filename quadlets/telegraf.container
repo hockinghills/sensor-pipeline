@@ -13,6 +13,8 @@ PodmanArgs=--privileged
 [Service]
 ExecStartPre=/bin/bash -c 'modprobe bme680_i2c || true'
 ExecStartPre=/bin/bash -c 'echo "bme680 0x77" > /sys/bus/i2c/devices/i2c-1/new_device || true'
+ExecStartPre=/bin/bash -c 'modprobe ti-ads1015 || true'
+ExecStartPre=/bin/bash -c 'echo "ads1015 0x48" > /sys/bus/i2c/devices/i2c-1/new_device || true'
 
 [Install]
 WantedBy=default.target
