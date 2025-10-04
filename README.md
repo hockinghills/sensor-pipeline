@@ -135,6 +135,37 @@ Common conflicts:
 - Native `influxdb3.service` taking port 8181
 - Manual containers taking ports
 
+### InfluxDB v3 Initialization Issues
+
+**Known Issue**: InfluxDB v3 may fail with "Failed to put initial table index conversion marker to object store" error.
+
+**Root Cause Analysis**:
+- InfluxDB v3 container runs as UID 1500 (influxdb3 user)
+- Data directories are created with UID 1000 (louthenw user)
+- Container cannot write to directories due to permission mismatch
+
+**Container User Test**:
+```bash
+# Check what user the container runs as
+podman run --rm docker.io/library/influxdb:3.3-core id
+
+# Test if container can write to data directory
+podman run --rm -v /home/louthenw/sensor-pipeline/data/influxdb:/var/lib/influxdb3:Z \
+  docker.io/library/influxdb:3.3-core touch /var/lib/influxdb3/test-write
+```
+
+**Potential Solutions Under Investigation**:
+1. Use `--without-auth` flag for InfluxDB v3 (found in help documentation)
+2. Add `User=1000:1000` directive to quadlet to match directory ownership
+3. Change directory ownership to match container user (UID 1500)
+
+**Working Setup Comparison**:
+- Previous working data was in `/home/louthenw/.influxdb3/piiot/` owned by UID 1000
+- Quadlet was working with this setup before reboot
+- Native `influxdb3.service` took over port 8181 after reboot, blocking quadlet
+
+**Status**: Investigation ongoing. HiveMQ and Telegraf services are running successfully.
+
 ## Data Flow
 
 1. **ESP32 Sensors** → Send JSON data via MQTT to topic `furnace/data`
@@ -198,5 +229,5 @@ In case of issues:
 ---
 
 **Created**: 2025-09-19
-**Last Updated**: 2025-09-19
-**Version**: 1.0
+**Last Updated**: 2025-09-20
+**Version**: 1.1
