@@ -25,7 +25,7 @@
   ]
   data_format = "json"
   name_override = "furnace"
-  interval = "100ms"  # High-frequency as specified; monitor for performance
+  interval = "10ms"  # High-frequency as specified; monitor for performance
 
 [[inputs.multifile]]
   base_dir = "/sys/bus/i2c/devices/1-0077/iio:device1"
@@ -47,17 +47,17 @@
     dest = "humidity"
     conversion = "float"  # Assuming % * 1000
 
-#[[inputs.multifile]]
-#  base_dir = "/sys/bus/i2c/devices/1-0048/iio:device0"
-#  name_override = "o2_sensor"
-#  interval = "100ms"
-#
-#  [[inputs.multifile.file]]
-#    file = "in_voltage1_raw"
-#    dest = "voltage_raw"
-#    conversion = "float"
-#
-#  [[inputs.multifile.file]]
-#    file = "in_voltage1_scale"
-#    dest = "voltage_scale"
-#    conversion = "float"
+[[inputs.multifile]]
+  base_dir = "/sys/bus/i2c/devices/1-0048/iio:device0"
+  name_override = "o2_sensor"
+  interval = "100ms"
+
+  [[inputs.multifile.file]]
+    file = "in_voltage1_raw"
+    dest = "voltage_raw"
+    conversion = "float"
+
+  [[inputs.multifile.file]]
+    file = "in_voltage1_scale"
+    dest = "voltage_scale"
+    conversion = "float"
