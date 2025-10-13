@@ -97,11 +97,13 @@ curl http://localhost:8181/health
 
 ### Telegraf Configuration
 Located in `configs/telegraf.conf`:
-- **MQTT Input**: Subscribes to `furnace/data` topic at 10ms interval
+- **MQTT Input**: Subscribes to `furnace/data` topic at 100ms interval from `tcp://127.0.0.1:1883`
 - **BME680 Input**: Reads from `/sys/bus/i2c/devices/1-0077/iio:device1` at 1000ms interval
-- **ADS1115 Input**: Reads from `/sys/bus/i2c/devices/1-0048/iio:device0` at 100ms interval
+- **ADS1115 Input**: Reads from `/sys/bus/i2c/devices/1-0048/iio:device0` at 100ms interval (currently disabled)
 - **Output**: InfluxDB v3 at `http://127.0.0.1:8181`
 - **Bucket**: `fucked`
+
+**Important**: All services use localhost addresses (127.0.0.1) to ensure the pipeline continues functioning during network outages or router reboots. This prevents "network unreachable" errors when external network connectivity is lost.
 
 ## Troubleshooting
 
@@ -312,8 +314,8 @@ In case of issues:
 ---
 
 **Created**: 2025-09-19
-**Last Updated**: 2025-10-04
-**Version**: 1.2
+**Last Updated**: 2025-10-13
+**Version**: 1.3
 ## Pipeline Verification
 
 Use this process to verify the data pipeline is functioning correctly. Run BEFORE and AFTER making changes to ensure nothing broke.
@@ -359,7 +361,7 @@ podman logs --tail 20 telegraf
 2025-10-07T18:00:18Z I! Starting Telegraf 1.35.4
 2025-10-07T18:00:18Z I! Loaded inputs: mqtt_consumer multifile
 2025-10-07T18:00:18Z I! Loaded outputs: influxdb_v2
-2025-10-07T18:00:18Z I! [inputs.mqtt_consumer] Connected [tcp://192.168.50.224:1883]
+2025-10-07T18:00:18Z I! [inputs.mqtt_consumer] Connected [tcp://127.0.0.1:1883]
 ```
 
 No `E!` (error) lines should appear repeatedly. One-time startup warnings are acceptable.
