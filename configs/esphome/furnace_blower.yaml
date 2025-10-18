@@ -1,0 +1,64 @@
+esphome:
+  name: furnace-blower
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESPTOOLPY_FLASHSIZE_16MB: y
+      CONFIG_ESPTOOLPY_FLASHMODE_QIO: y
+      CONFIG_SPIRAM_MODE_OCT: y
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+wifi:
+  ssid: "michaelsShop"
+  password: "kickGlass55&"
+  power_save_mode: none
+
+# Enable web interface for direct PWM control
+web_server:
+  port: 80
+
+logger:
+  level: INFO
+
+output:
+  - platform: ledc
+    pin: GPIO18
+    id: pwm_fan
+    frequency: 3000Hz
+
+number:
+  - platform: template
+    id: pwm_setpoint
+    name: "Blower PWM (%)"
+    min_value: 0
+    max_value: 100
+    step: 1
+    optimistic: true
+    set_action:
+      - lambda: |-
+          float duty = x / 100.0;
+          id(pwm_fan).set_level(duty);
+
+sensor:
+  - platform: pulse_counter
+    pin: GPIO19
+    id: hall_sensor
+    name: "Blower RPM"
+    update_interval: 2s
+    filters:
+      # Convert Hz to RPM (assuming 2 pulses per revolution)
+      # If your sensor is 1 pulse per rev, change to: multiply(60)
+      - multiply: 30  # (60 sec/min) / (2 pulses/rev) = 30
+
+ota:
+  - platform: esphome
+    password: "stupidPass66%"
+
+api:

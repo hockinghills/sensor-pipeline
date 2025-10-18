@@ -1,0 +1,15 @@
+[Unit]
+Description=ESPHome Dashboard and Device Manager
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName=esphome
+Image=ghcr.io/esphome/esphome:latest
+PublishPort=6052:6052
+Network=host
+Volume=%h/sensor-pipeline/configs/esphome:/config:Z
+PodmanArgs=--privileged
+
+[Install]
+WantedBy=default.target

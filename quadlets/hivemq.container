@@ -7,6 +7,7 @@ Wants=network-online.target
 ContainerName=hivemq
 Image=docker.io/hivemq/hivemq-edge:latest
 PublishPort=1883:1883
+PublishPort=8080:8080
 Volume=%h/sensor-pipeline/data/hivemq:/opt/hivemq/data:Z
 
 [Install]

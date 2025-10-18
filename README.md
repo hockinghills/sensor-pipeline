@@ -201,9 +201,11 @@ sensor-pipeline/
 
 - Podman with quadlet support
 - systemd user services enabled
-- I2C kernel modules for BME680
-- netcat (nc) for port checking
+- I2C kernel modules for BME680 (`bme680_core`, `bme680_i2c`)
+- Bash built-in `/dev/tcp/` for port checking (no external dependencies)
 - Network connectivity for container pulls
+- Tailscale for Grafana Cloud connectivity
+- `jq` for JSON parsing (used by health check script)
 
 ## Backup
 
@@ -224,9 +226,50 @@ In case of issues:
 
 ## Pipeline Verification
 
-Use this process to verify the data pipeline is functioning correctly. Run BEFORE and AFTER making changes to ensure nothing broke.
+### Automated Health Check Script
 
-### Quick Health Check
+The easiest way to verify the entire pipeline is with the health check script:
+
+```bash
+~/sensor-pipeline/scripts/health-check.sh
+```
+
+This comprehensive script checks:
+1. **Systemd Services** - All services running
+2. **Container Status** - All containers up with uptime
+3. **ESP32 MQTT Data Flow** - Live furnace sensor data
+4. **BME680 Environmental Sensor** - Temperature, pressure, humidity readings
+5. **Telegraf Status** - MQTT connection and error detection
+6. **Network Ports** - MQTT (1883), Web UI (8080), InfluxDB (8181)
+7. **Tailscale Network** - Grafana Cloud peer connectivity
+
+**Example output:**
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  IoT Sensor Pipeline Health Check
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[1] Systemd Services
+  ✓ hivemq.service - running
+  ✓ influxdb.service - running
+  ✓ telegraf.service - running
+
+[7] Tailscale Network
+  ✓ Tailscale connected
+  ✓ Grafana Cloud peers: 10/10 online
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✓ Overall Status: HEALTHY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+The script returns exit code 0 if healthy, 1 if issues detected (useful for automation).
+
+---
+
+### Manual Health Check Steps
+
+Use this process to verify the data pipeline is functioning correctly. Run BEFORE and AFTER making changes to ensure nothing broke.
 
 ```bash
 # 1. Verify ESP32 MQTT data is flowing
@@ -273,13 +316,49 @@ podman logs --tail 20 telegraf
 No `E!` (error) lines should appear repeatedly. One-time startup warnings are acceptable.
 
 ### If Something Breaks
-1. Check service status: `systemctl --user status hivemq.service telegraf.service influxdb.service`
-2. Verify config syntax: Check `configs/telegraf.conf` for typos
-3. Check Grafana Cloud: Is data still appearing in dashboards?
-4. Restart services: `systemctl --user restart telegraf.service`
+1. Run health check: `~/sensor-pipeline/scripts/health-check.sh`
+2. Check service status: `systemctl --user status hivemq.service telegraf.service influxdb.service`
+3. Verify config syntax: Check `configs/telegraf.conf` for typos
+4. Check Grafana Cloud: Is data still appearing in dashboards?
+5. Restart services: `systemctl --user restart telegraf.service`
+
+---
+
+## Recent Updates (2025-10-18)
+
+### Reboot Resilience Fixes
+Fixed critical issues preventing graceful reboot recovery:
+
+1. **Removed `nc` dependency** - Replaced with bash built-in `/dev/tcp/` for MQTT port checking
+   - File: `telegraf.container` line 14
+   - Old: `nc -z 127.0.0.1 1883`
+   - New: `timeout 1 bash -c "</dev/tcp/127.0.0.1/1883"`
+
+2. **Fixed BME680 kernel module loading** - Added `bme680_core` dependency
+   - File: `telegraf.container` line 15-16
+   - Now loads both `bme680_core` and `bme680_i2c` in correct order
+
+3. **Fixed I2C symlink path** - Changed to absolute path for reliability
+   - File: `telegraf.container` line 17
+   - Old: `ln -sf ../iio:device0`
+   - New: `ln -sf /sys/bus/i2c/devices/1-0077/iio:device0`
+
+4. **Added HiveMQ Web UI port** - Web interface now accessible
+   - File: `hivemq.container` line 10
+   - Added: `PublishPort=8080:8080`
+
+### New Health Check Script
+Added comprehensive monitoring script at `scripts/health-check.sh`:
+- Checks all services, containers, sensors, and network connectivity
+- Validates Tailscale and Grafana Cloud peer status
+- Shows live sensor readings
+- Color-coded output with ✓/✗ indicators
+- Exit codes for automation (0=healthy, 1=issues)
+
+**Pipeline now survives reboots without intervention!**
 
 ---
 
 **Created**: 2025-09-19
 **Last Updated**: 2025-10-18
-**Version**: 1.4
+**Version**: 1.5
