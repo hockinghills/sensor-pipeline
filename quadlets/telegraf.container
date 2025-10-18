@@ -11,11 +11,10 @@ Volume=%h/sensor-pipeline/configs/telegraf.conf:/etc/telegraf/telegraf.conf:ro
 PodmanArgs=--privileged
 
 [Service]
+ExecStartPre=/bin/bash -c 'until nc -z 127.0.0.1 1883; do sleep 2; done'
 ExecStartPre=/bin/bash -c 'modprobe bme680_i2c || true'
 ExecStartPre=/bin/bash -c 'echo "bme680 0x77" > /sys/bus/i2c/devices/i2c-1/new_device || true'
-ExecStartPre=/bin/bash -c 'modprobe ti-ads1015 || true'
-ExecStartPre=/bin/bash -c 'echo "ads1015 0x48" > /sys/bus/i2c/devices/i2c-1/new_device || true'
-ExecStartPre=/bin/bash -c 'sleep 1 && mkdir -p /dev/iio && ln -sf ../iio:device1 /dev/iio/bme680 || true'
+ExecStartPre=/bin/bash -c 'sleep 1 && mkdir -p /dev/iio && ln -sf ../iio:device0 /dev/iio/bme680 || true'
 
 [Install]
 WantedBy=default.target
