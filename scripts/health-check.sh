@@ -37,7 +37,7 @@ echo ""
 
 # 2. Check container status
 echo -e "${BLUE}[2] Container Status${NC}"
-for container in hivemq influxdb3 telegraf; do
+for container in hivemq influxdb2 telegraf; do
     if podman ps --format "{{.Names}}" | grep -q "^${container}$"; then
         uptime=$(podman ps --filter "name=${container}" --format "{{.Status}}")
         echo -e "  ${GREEN}${CHECK}${NC} ${container} - ${uptime}"
@@ -135,7 +135,7 @@ echo ""
 
 # 6. Check port availability
 echo -e "${BLUE}[6] Network Ports${NC}"
-for port_info in "1883:HiveMQ MQTT" "8080:HiveMQ Web UI" "8181:InfluxDB API"; do
+for port_info in "1883:HiveMQ MQTT" "8080:HiveMQ Web UI" "8086:InfluxDB API"; do
     port="${port_info%%:*}"
     service="${port_info#*:}"
 

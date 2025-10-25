@@ -3,6 +3,9 @@ configs/influxdb_token.txt
 *.log
 *.pid
 
+# Ignore database data directories
+data/
+
 # Ignore backup archives
 *.tar.gz
 *.zip
