@@ -5,9 +5,35 @@ A complete IoT sensor data pipeline using Podman quadlets for containerized serv
 ## Architecture
 
 ```
-ESP32 → MQTT → HiveMQ Edge → Telegraf → InfluxDB v3 → Grafana
-BME680 Sensor → Telegraf → InfluxDB v3 → Grafana
+ESP32 → MQTT → HiveMQ Edge → Telegraf → InfluxDB v3 → Grafana Cloud
+BME680 Sensor → Telegraf → InfluxDB v3 → Grafana Cloud
 ```
+
+## Equipment Being Monitored
+
+### Glass Furnace
+This pipeline monitors a **150 lb free-standing recuperated pot furnace** designed and built by Charles Correll. The furnace is used for **Lyon's Pyre Glasswerks**, Michael's art glass business, located in his garage.
+
+**Operating Parameters:**
+- **Normal operating temperature**: ~2320°F (glass melting temperature)
+- **Idle/maintenance temperature**: ~1900°F (standby mode)
+- **Fuel**: Natural gas with recuperative burner system
+- **Safety-critical**: High-frequency monitoring (100ms) for temperature and flame detection
+
+**Monitored Parameters:**
+- **Furnace temperature**: Thermocouple measurement with cold junction compensation
+- **Flame sensor**: Monitors burner operation and flame presence
+- **Gas pressure**: Inlet and outlet pressure monitoring (PSI)
+- **ESP32 health**: Free heap memory to detect device issues
+
+### Grafana Cloud Alerting
+**Active alerts configured for safety monitoring:**
+- **Temperature alerts**: High/low temperature threshold violations
+- **Data flow alerts**: Missing data (connectivity or hardware failure)
+- **Flame sensor alerts**: Burner operation problems
+- **Alert recipients**: louthenw (active), Michael (to be added)
+
+These alerts provide critical safety monitoring for the glass furnace operation.
 
 ## Components
 
