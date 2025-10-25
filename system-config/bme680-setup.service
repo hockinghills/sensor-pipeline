@@ -1,0 +1,13 @@
+[Unit]
+Description=BME680 Sensor Setup
+After=sys-devices-platform-soc-fe804000.i2c-i2c\x2d1.device
+Before=telegraf.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo "bme680 0x77" > /sys/bus/i2c/devices/i2c-1/new_device || true'
+ExecStop=/bin/sh -c 'echo "0x77" > /sys/bus/i2c/devices/i2c-1/delete_device || true'
+
+[Install]
+WantedBy=multi-user.target

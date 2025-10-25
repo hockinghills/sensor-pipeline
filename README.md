@@ -38,12 +38,20 @@ The BME680 connects via I2C and provides:
 - Temperature
 - Humidity
 - Pressure
-- Air quality (gas resistance)
+
+**Note**: Gas resistance (air quality) measurement is not enabled to maximize sensor reading speed. The gas sensor heater adds significant delay to readings.
 
 **I2C Address**: 0x77
 **IIO Device**: `/sys/bus/i2c/devices/1-0077/iio:device0`
 
-The sensor is automatically initialized by the telegraf quadlet on startup.
+#### Automatic Initialization at Boot
+
+The BME680 sensor is automatically initialized at boot using systemd services:
+
+1. **Kernel Modules**: `/etc/modules-load.d/bme680.conf` loads `bme680_core` and `bme680_i2c` drivers
+2. **Device Registration**: `bme680-setup.service` automatically registers the sensor on the I2C bus at address 0x77
+
+The sensor will be fully operational immediately after boot without manual intervention.
 
 ## Installation
 
@@ -75,6 +83,21 @@ systemctl --user start hivemq.service influxdb.service telegraf.service
 ### 6. Enable Auto-start
 ```bash
 systemctl --user enable hivemq.service influxdb.service telegraf.service
+```
+
+### 7. Install BME680 Boot Configuration (Optional but Recommended)
+For automatic BME680 sensor initialization at boot:
+```bash
+# Copy systemd service
+sudo cp system-config/bme680-setup.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable bme680-setup.service
+
+# Copy modules auto-load config
+sudo cp system-config/bme680.conf /etc/modules-load.d/
+
+# Start the service now (or it will run on next boot)
+sudo systemctl start bme680-setup.service
 ```
 
 ## Configuration
@@ -131,14 +154,22 @@ i2cdetect -y 1
 ```
 
 #### Manual Sensor Initialization
-If the sensor doesn't initialize automatically:
+The BME680 sensor initializes automatically at boot via systemd services. If you need to manually trigger initialization (for testing or troubleshooting):
+
 ```bash
-# BME680
-sudo modprobe bme680_i2c
+# Load kernel modules
+sudo modprobe bme680_core bme680_i2c
+
+# Register device on I2C bus
 echo "bme680 0x77" | sudo tee /sys/bus/i2c/devices/i2c-1/new_device
 
 # Verify
 ls /sys/bus/i2c/devices/1-0077/iio:device*/
+```
+
+To check the automatic boot service status:
+```bash
+sudo systemctl status bme680-setup.service
 ```
 
 #### Reading Sensor Values Directly
@@ -182,12 +213,15 @@ sensor-pipeline/
 │   └── telegraf.container    # Telegraf quadlet
 ├── configs/
 │   └── telegraf.conf         # Telegraf configuration
+├── system-config/
+│   ├── bme680-setup.service  # BME680 systemd service
+│   └── bme680.conf          # BME680 modules auto-load config
 ├── data/
 │   ├── hivemq/              # HiveMQ persistence
 │   ├── influxdb/            # InfluxDB data
 │   └── telegraf/            # Telegraf logs (if needed)
 └── scripts/
-    └── (future backup/maintenance scripts)
+    └── health-check.sh      # Comprehensive pipeline health check
 ```
 
 ## Network Configuration
@@ -202,6 +236,7 @@ sensor-pipeline/
 - Podman with quadlet support
 - systemd user services enabled
 - I2C kernel modules for BME680 (`bme680_core`, `bme680_i2c`)
+- systemd system service for BME680 auto-initialization (`bme680-setup.service`)
 - Bash built-in `/dev/tcp/` for port checking (no external dependencies)
 - Network connectivity for container pulls
 - Tailscale for Grafana Cloud connectivity
@@ -359,6 +394,30 @@ Added comprehensive monitoring script at `scripts/health-check.sh`:
 
 ---
 
+## Recent Updates (2025-10-24)
+
+### BME680 Automatic Boot Configuration
+Implemented persistent boot configuration for the BME680 environmental sensor:
+
+1. **Module Auto-loading** - Created `/etc/modules-load.d/bme680.conf`
+   - Automatically loads `bme680_core` and `bme680_i2c` kernel modules at boot
+   - Eliminates need for manual module loading after reboot
+
+2. **Systemd Service** - Created `bme680-setup.service`
+   - Automatically registers BME680 device on I2C bus at startup
+   - Service file: `/etc/systemd/system/bme680-setup.service`
+   - Runs before telegraf.service to ensure sensor is available
+   - Includes cleanup on service stop
+
+3. **Performance Optimization** - Gas sensor disabled
+   - Telegraf only reads temperature, pressure, and humidity
+   - Gas resistance measurement skipped to maximize reading speed
+   - Eliminates heater activation delay for faster sampling
+
+**The BME680 sensor now initializes automatically on every boot with no manual intervention required.**
+
+---
+
 **Created**: 2025-09-19
-**Last Updated**: 2025-10-18
-**Version**: 1.5
+**Last Updated**: 2025-10-24
+**Version**: 1.6
