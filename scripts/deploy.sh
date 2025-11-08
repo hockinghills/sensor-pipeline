@@ -63,7 +63,7 @@ echo "🔄 Reloading systemd configuration..."
 systemctl --user daemon-reload
 
 echo "🚀 Starting services..."
-systemctl --user enable hivemq.service influxdb.service telegraf.service
+systemctl --user enable hivemq.service influxdb.service telegraf.service grafana.service
 
 # Start HiveMQ first
 echo "📡 Starting HiveMQ Edge..."
@@ -109,9 +109,14 @@ echo "📊 Starting Telegraf..."
 systemctl --user start telegraf.service
 sleep 5
 
+# Start Grafana
+echo "📈 Starting Grafana..."
+systemctl --user start grafana.service
+sleep 5
+
 # Check service status
 echo "🔍 Checking service status..."
-for service in hivemq influxdb telegraf; do
+for service in hivemq influxdb telegraf grafana; do
     if systemctl --user is-active --quiet ${service}.service; then
         echo "✅ ${service}.service is running"
     else
@@ -123,10 +128,13 @@ echo ""
 echo "🎉 Deployment complete!"
 echo ""
 echo "📋 Next steps:"
-echo "1. Update Grafana Cloud with the new token:"
+echo "1. Access local Grafana dashboard:"
+echo "   http://192.168.50.224:3000 (login: admin/admin)"
+echo "2. Update Grafana Cloud with the new token (if needed):"
 echo "   Token: $TOKEN"
-echo "2. Verify data flow:"
+echo "3. Verify data flow:"
 echo "   podman exec influxdb3 influxdb3 query --token \"$TOKEN\" --database fucked \"SHOW TABLES\""
-echo "3. Check for flame sensor wiring if needed"
+echo "4. Import dashboards to local Grafana from Grafana Cloud"
+echo "5. Check for flame sensor wiring if needed"
 echo ""
 echo "📚 For troubleshooting, see: $PROJECT_DIR/README.md"

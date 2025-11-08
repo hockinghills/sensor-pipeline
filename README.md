@@ -5,8 +5,8 @@ A complete IoT sensor data pipeline using Podman quadlets for containerized serv
 ## Architecture
 
 ```
-ESP32 → MQTT → HiveMQ Edge → Telegraf → InfluxDB v3 → Grafana Cloud
-BME680 Sensor → Telegraf → InfluxDB v3 → Grafana Cloud
+ESP32 → MQTT → HiveMQ Edge → Telegraf → InfluxDB v3 → Grafana (Local + Cloud)
+BME680 Sensor → Telegraf → InfluxDB v3 → Grafana (Local + Cloud)
 ```
 
 ## Equipment Being Monitored
@@ -37,19 +37,29 @@ These alerts provide critical safety monitoring for the glass furnace operation.
 
 ## Components
 
-### 1. HiveMQ Edge MQTT Broker
+### 1. Grafana Dashboard
+- **Port**: 3000 (Web UI)
+- **Data**: Persisted in `data/grafana/`
+- **Purpose**: Real-time visualization of furnace and environmental data
+- **Access**: http://localhost:3000 or http://192.168.50.224:3000
+- **Credentials**: admin/admin (default)
+- **Data Source**: Local InfluxDB v3 instance (auto-provisioned)
+- **Dashboards**: Auto-provisioned from `data/grafana/dashboards/`
+- **Benefits**: Local access to dashboards without internet dependency
+
+### 2. HiveMQ Edge MQTT Broker
 - **Port**: 1883 (MQTT), 8080 (Web UI)
 - **Data**: Persisted in `data/hivemq/`
 - **Purpose**: Receives MQTT messages from ESP32 sensors
 - **Startup time**: ~90 seconds to fully initialize
 
-### 2. InfluxDB v3 Core
+### 3. InfluxDB v3 Core
 - **Port**: 8181
 - **Data**: Persisted in `data/influxdb/`
 - **Purpose**: Time-series database for sensor data
 - **Node ID**: piiot
 
-### 3. Telegraf
+### 4. Telegraf
 - **Purpose**: Data collection agent
 - **Inputs**:
   - MQTT consumer (from HiveMQ)
@@ -103,13 +113,14 @@ Data directories are automatically created by the containers.
 ### 5. Reload and Start Services
 ```bash
 systemctl --user daemon-reload
-systemctl --user start hivemq.service influxdb.service telegraf.service
+systemctl --user start hivemq.service influxdb.service telegraf.service grafana.service
 ```
 
 ### 6. Enable Auto-start
 ```bash
-systemctl --user enable hivemq.service influxdb.service telegraf.service
+systemctl --user enable grafana.service
 ```
+Note: HiveMQ, InfluxDB, and Telegraf are managed by quadlets and don't need separate enable commands.
 
 ### 7. Install BME680 Boot Configuration (Optional but Recommended)
 For automatic BME680 sensor initialization at boot:
@@ -150,7 +161,7 @@ This ensures all dependencies are ready before Telegraf starts, preventing conne
 
 ### Service Status
 ```bash
-systemctl --user status hivemq.service influxdb.service telegraf.service
+systemctl --user status hivemq.service influxdb.service telegraf.service grafana.service
 ```
 
 ### Logs
@@ -158,6 +169,7 @@ systemctl --user status hivemq.service influxdb.service telegraf.service
 journalctl --user -u hivemq.service -f
 journalctl --user -u influxdb.service -f
 journalctl --user -u telegraf.service -f
+journalctl --user -u grafana.service -f
 ```
 
 ### Container Status
@@ -166,6 +178,7 @@ podman ps
 podman logs hivemq
 podman logs influxdb3
 podman logs telegraf
+podman logs grafana
 ```
 
 ### I2C Sensor Issues
@@ -236,18 +249,27 @@ sensor-pipeline/
 ├── quadlets/
 │   ├── hivemq.container      # HiveMQ Edge quadlet
 │   ├── influxdb.container    # InfluxDB v3 quadlet
-│   └── telegraf.container    # Telegraf quadlet
+│   ├── telegraf.container    # Telegraf quadlet
+│   └── grafana.container     # Grafana quadlet
 ├── configs/
-│   └── telegraf.conf         # Telegraf configuration
+│   ├── telegraf.conf         # Telegraf configuration
+│   └── grafana/
+│       └── provisioning/
+│           ├── datasources/  # InfluxDB datasource config
+│           └── dashboards/   # Dashboard provisioning config
 ├── system-config/
 │   ├── bme680-setup.service  # BME680 systemd service
-│   └── bme680.conf          # BME680 modules auto-load config
+│   └── bme680.conf           # BME680 modules auto-load config
 ├── data/
-│   ├── hivemq/              # HiveMQ persistence
-│   ├── influxdb/            # InfluxDB data
-│   └── telegraf/            # Telegraf logs (if needed)
+│   ├── hivemq/               # HiveMQ persistence
+│   ├── influxdb/             # InfluxDB data
+│   ├── telegraf/             # Telegraf logs (if needed)
+│   └── grafana/
+│       ├── dashboards/       # Dashboard JSON files
+│       └── grafana.db        # Grafana database
 └── scripts/
-    └── health-check.sh      # Comprehensive pipeline health check
+    ├── health-check.sh       # Comprehensive pipeline health check
+    └── deploy.sh             # Automated deployment script
 ```
 
 ## Network Configuration
@@ -256,6 +278,7 @@ sensor-pipeline/
 - **MQTT Port**: 1883
 - **HiveMQ Web UI**: http://192.168.50.224:8080
 - **InfluxDB API**: http://192.168.50.224:8181
+- **Grafana UI**: http://192.168.50.224:3000
 
 ## Dependencies
 
@@ -273,15 +296,17 @@ sensor-pipeline/
 Important directories to backup:
 - `data/influxdb/` - All sensor data
 - `data/hivemq/` - MQTT broker state
+- `data/grafana/` - Grafana dashboards and configuration
 - `configs/telegraf.conf` - Data collection config
+- `configs/grafana/` - Grafana provisioning configuration
 
 ## Recovery
 
 In case of issues:
-1. Stop all services: `systemctl --user stop hivemq.service influxdb.service telegraf.service`
+1. Stop all services: `systemctl --user stop hivemq.service influxdb.service telegraf.service grafana.service`
 2. Check service status and logs
 3. Verify container images: `podman images`
-4. Restart services: `systemctl --user start hivemq.service influxdb.service telegraf.service`
+4. Restart services: `systemctl --user start hivemq.service influxdb.service telegraf.service grafana.service`
 
 ---
 
@@ -296,12 +321,12 @@ The easiest way to verify the entire pipeline is with the health check script:
 ```
 
 This comprehensive script checks:
-1. **Systemd Services** - All services running
+1. **Systemd Services** - All services running (HiveMQ, InfluxDB, Telegraf, Grafana)
 2. **Container Status** - All containers up with uptime
 3. **ESP32 MQTT Data Flow** - Live furnace sensor data
 4. **BME680 Environmental Sensor** - Temperature, pressure, humidity readings
 5. **Telegraf Status** - MQTT connection and error detection
-6. **Network Ports** - MQTT (1883), Web UI (8080), InfluxDB (8181)
+6. **Network Ports** - MQTT (1883), HiveMQ Web UI (8080), InfluxDB (8181), Grafana (3000)
 7. **Tailscale Network** - Grafana Cloud peer connectivity
 
 **Example output:**
@@ -314,6 +339,7 @@ This comprehensive script checks:
   ✓ hivemq.service - running
   ✓ influxdb.service - running
   ✓ telegraf.service - running
+  ✓ grafana.service - running
 
 [7] Tailscale Network
   ✓ Tailscale connected
@@ -378,10 +404,11 @@ No `E!` (error) lines should appear repeatedly. One-time startup warnings are ac
 
 ### If Something Breaks
 1. Run health check: `~/sensor-pipeline/scripts/health-check.sh`
-2. Check service status: `systemctl --user status hivemq.service telegraf.service influxdb.service`
+2. Check service status: `systemctl --user status hivemq.service telegraf.service influxdb.service grafana.service`
 3. Verify config syntax: Check `configs/telegraf.conf` for typos
-4. Check Grafana Cloud: Is data still appearing in dashboards?
-5. Restart services: `systemctl --user restart telegraf.service`
+4. Check local Grafana: http://localhost:3000
+5. Check Grafana Cloud: Is data still appearing in dashboards?
+6. Restart services: `systemctl --user restart grafana.service` or `systemctl --user restart telegraf.service`
 
 ---
 
@@ -444,6 +471,42 @@ Implemented persistent boot configuration for the BME680 environmental sensor:
 
 ---
 
+## Recent Updates (2025-11-08)
+
+### Local Grafana Dashboard Deployment
+Implemented containerized Grafana for local on-site dashboard access:
+
+1. **Containerized Grafana** - Added `grafana.container` quadlet
+   - Runs as Podman container managed by systemd
+   - Port 3000 for web UI access
+   - Persistent data storage in `data/grafana/`
+   - Auto-provisioning of InfluxDB datasource
+
+2. **Auto-Provisioned Data Source** - InfluxDB connection configured automatically
+   - Connects to local InfluxDB v3 instance (http://influxdb3:8181)
+   - Uses existing InfluxDB token from Telegraf configuration
+   - Organization: empyrean, Bucket: fucked
+
+3. **Dashboard Provisioning** - Dashboards automatically loaded on startup
+   - Dashboards stored in `data/grafana/dashboards/`
+   - Import dashboard JSON files from Grafana Cloud for local access
+   - Changes persist across container restarts
+
+4. **Health Check Updates** - Added Grafana monitoring
+   - Checks Grafana service and container status
+   - Verifies port 3000 accessibility
+   - Updated to monitor 4 services: HiveMQ, InfluxDB, Telegraf, Grafana
+
+5. **Benefits**:
+   - **No internet dependency** for on-site monitoring
+   - **Faster access** when at the shop
+   - **Consistent architecture** - all services containerized with Podman quadlets
+   - **Grafana Cloud remains available** for remote access and alerting
+
+**Access local Grafana at http://192.168.50.224:3000 (login: admin/admin)**
+
+---
+
 **Created**: 2025-09-19
-**Last Updated**: 2025-10-24
-**Version**: 1.6
+**Last Updated**: 2025-11-08
+**Version**: 1.7

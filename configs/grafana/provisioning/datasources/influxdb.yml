@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    url: http://influxdb3:8181
+    jsonData:
+      version: Flux
+      organization: empyrean
+      defaultBucket: fucked
+      tlsSkipVerify: true
+    secureJsonData:
+      token: oxofnG-llFqgr8S5ZddcnI8DdqdbCkFn-2-svlyjD2YjKptM6tpvSDwv0VxNlyj1LhbH7Us1Tv_BEEmhCOxshQ==
+    editable: true
+    isDefault: true

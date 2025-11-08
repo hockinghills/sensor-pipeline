@@ -1,0 +1,23 @@
+
+[Unit]
+Description=Grafana Local Dashboard
+After=network-online.target influxdb.service
+Wants=network-online.target
+
+[Container]
+ContainerName=grafana
+Image=docker.io/grafana/grafana:latest
+PublishPort=3000:3000
+Volume=%h/sensor-pipeline/data/grafana:/var/lib/grafana:Z
+Volume=%h/sensor-pipeline/configs/grafana/provisioning:/etc/grafana/provisioning:Z
+Environment=GF_SECURITY_ADMIN_USER=admin
+Environment=GF_SECURITY_ADMIN_PASSWORD=admin
+Environment=GF_SERVER_ROOT_URL=http://localhost:3000
+Environment=GF_AUTH_ANONYMOUS_ENABLED=true
+Environment=GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+
+[Service]
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

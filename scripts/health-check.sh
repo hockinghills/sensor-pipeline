@@ -37,7 +37,7 @@ echo ""
 
 # 2. Check container status
 echo -e "${BLUE}[2] Container Status${NC}"
-for container in hivemq influxdb2 telegraf; do
+for container in hivemq influxdb2 telegraf grafana; do
     if podman ps --format "{{.Names}}" | grep -q "^${container}$"; then
         uptime=$(podman ps --filter "name=${container}" --format "{{.Status}}")
         echo -e "  ${GREEN}${CHECK}${NC} ${container} - ${uptime}"
@@ -113,6 +113,7 @@ echo ""
 # 5. Check Telegraf logs for errors
 echo -e "${BLUE}[5] Telegraf Status${NC}"
 TELEGRAF_ERRORS=$(podman logs --tail 50 telegraf 2>&1 | grep -c "E!")
+TELEGRAF_WARNINGS=$(podman logs --tail 50 telegraf 2>&1 | grep -E "W!.*output|W!.*flush|W!.*deadline|E!.*output|E!.*write" | wc -l)
 TELEGRAF_CONNECTED=$(podman logs --tail 20 telegraf 2>&1 | grep "Connected \[tcp://127.0.0.1:1883\]" | tail -1)
 
 if [ -n "$TELEGRAF_CONNECTED" ]; then
@@ -121,7 +122,12 @@ else
     echo -e "  ${YELLOW}${WARN}${NC} Telegraf MQTT connection status unknown"
 fi
 
-if [ "$TELEGRAF_ERRORS" -eq 0 ]; then
+# Check for output/write issues
+if [ "$TELEGRAF_WARNINGS" -gt 0 ]; then
+    echo -e "  ${RED}${CROSS}${NC} ${TELEGRAF_WARNINGS} output/write issue(s) detected"
+    echo -e "  ${YELLOW}  Run: podman logs telegraf | grep -E 'output|write|flush' | tail -10${NC}"
+    ALL_HEALTHY=false
+elif [ "$TELEGRAF_ERRORS" -eq 0 ]; then
     echo -e "  ${GREEN}${CHECK}${NC} No recent errors in logs"
 elif [ "$TELEGRAF_ERRORS" -lt 5 ]; then
     echo -e "  ${YELLOW}${WARN}${NC} ${TELEGRAF_ERRORS} error(s) in recent logs"
@@ -131,11 +137,34 @@ else
     echo -e "  ${YELLOW}  Run: podman logs telegraf | grep 'E!' | tail -10${NC}"
     ALL_HEALTHY=false
 fi
+
+# CRITICAL: Verify data is actually being written to InfluxDB
+INFLUX_TOKEN="oxofnG-llFqgr8S5ZddcnI8DdqdbCkFn-2-svlyjD2YjKptM6tpvSDwv0VxNlyj1LhbH7Us1Tv_BEEmhCOxshQ=="
+RECENT_DATA=$(podman exec influxdb2 influx query 'from(bucket: "fucked") |> range(start: -2m) |> filter(fn: (r) => r._measurement == "furnace") |> count()' --org empyrean --token "$INFLUX_TOKEN" 2>/dev/null | grep -oP '\d+\s*$' | head -1 | tr -d ' ')
+
+if [ -n "$RECENT_DATA" ] && [ "$RECENT_DATA" -gt 0 ]; then
+    echo -e "  ${GREEN}${CHECK}${NC} Data successfully writing to InfluxDB (${RECENT_DATA} points in last 2min)"
+else
+    echo -e "  ${RED}${CROSS}${NC} NO DATA written to InfluxDB in last 2 minutes!"
+    echo -e "  ${YELLOW}  This is a CRITICAL failure - data pipeline is broken${NC}"
+    ALL_HEALTHY=false
+fi
+
+# Check InfluxDB for error spam
+INFLUX_ERRORS=$(podman logs --tail 100 influxdb2 2>&1 | grep -c "Unauthorized\|authorization not found")
+if [ "$INFLUX_ERRORS" -gt 10 ]; then
+    echo -e "  ${RED}${CROSS}${NC} InfluxDB receiving ${INFLUX_ERRORS} unauthorized requests"
+    echo -e "  ${YELLOW}  Check Grafana Cloud data source authentication${NC}"
+    ALL_HEALTHY=false
+elif [ "$INFLUX_ERRORS" -gt 0 ]; then
+    echo -e "  ${YELLOW}${WARN}${NC} InfluxDB has ${INFLUX_ERRORS} authorization errors (may be transient)"
+fi
+
 echo ""
 
 # 6. Check port availability
 echo -e "${BLUE}[6] Network Ports${NC}"
-for port_info in "1883:HiveMQ MQTT" "8080:HiveMQ Web UI" "8086:InfluxDB API"; do
+for port_info in "1883:HiveMQ MQTT" "8080:HiveMQ Web UI" "8086:InfluxDB API" "3000:Grafana UI"; do
     port="${port_info%%:*}"
     service="${port_info#*:}"
 
