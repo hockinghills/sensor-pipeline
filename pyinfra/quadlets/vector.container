@@ -1,0 +1,23 @@
+[Unit]
+Description=Vector Data Pipeline
+After=victoriametrics.service hivemq.service
+Requires=victoriametrics.service hivemq.service
+
+[Container]
+ContainerName=vector
+Image=docker.io/timberio/vector:latest-alpine
+Network=host
+Volume=%h/sensor-pipeline/configs/vector.toml:/etc/vector/vector.toml:ro
+Volume=/dev/ttyACM0:/dev/ttyACM0
+PodmanArgs=--privileged
+Exec=--config /etc/vector/vector.toml
+
+[Service]
+Restart=always
+RestartSec=10
+ExecStartPre=/bin/bash -c 'modprobe bme680_core || true'
+ExecStartPre=/bin/bash -c 'modprobe bme680_i2c || true'
+ExecStartPre=/bin/bash -c 'echo "bme680 0x77" > /sys/bus/i2c/devices/i2c-1/new_device || true'
+
+[Install]
+WantedBy=default.target

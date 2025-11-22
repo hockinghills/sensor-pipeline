@@ -6,6 +6,9 @@ configs/influxdb_token.txt
 # Ignore database data directories
 data/
 
+# Ignore migration work-in-progress
+migration/
+
 # Ignore backup archives
 *.tar.gz
 *.zip

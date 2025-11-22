@@ -1,0 +1,18 @@
+[Unit]
+Description=VictoriaMetrics Time Series Database
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName=victoriametrics
+Image=docker.io/victoriametrics/victoria-metrics:latest
+PublishPort=8428:8428
+Volume=%h/sensor-pipeline/data/victoriametrics:/victoria-metrics-data
+Exec=-storageDataPath=/victoria-metrics-data -retentionPeriod=100y
+
+[Service]
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

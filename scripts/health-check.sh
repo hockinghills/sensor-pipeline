@@ -20,12 +20,18 @@ echo -e "${BLUE}  IoT Sensor Pipeline Health Check${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
+# Telegraf Failure Log
+echo -e "${BLUE}Telegraf Failure Log:${NC}"
+echo -e "  2025-11-14 22:00 - MQTT connection reset by peer"
+echo -e "  2025-11-15 01:06 - MQTT connection reset by peer"
+echo ""
+
 # Track overall health
 ALL_HEALTHY=true
 
 # 1. Check systemd services
 echo -e "${BLUE}[1] Systemd Services${NC}"
-for service in hivemq influxdb telegraf; do
+for service in hivemq influxdb telegraf vector; do
     if systemctl --user is-active --quiet ${service}.service; then
         echo -e "  ${GREEN}${CHECK}${NC} ${service}.service - running"
     else
@@ -37,7 +43,7 @@ echo ""
 
 # 2. Check container status
 echo -e "${BLUE}[2] Container Status${NC}"
-for container in hivemq influxdb2 telegraf grafana; do
+for container in hivemq influxdb2 telegraf vector; do
     if podman ps --format "{{.Names}}" | grep -q "^${container}$"; then
         uptime=$(podman ps --filter "name=${container}" --format "{{.Status}}")
         echo -e "  ${GREEN}${CHECK}${NC} ${container} - ${uptime}"
@@ -52,30 +58,46 @@ echo ""
 echo -e "${BLUE}[3] ESP32 MQTT Data Flow${NC}"
 MQTT_DATA=$(timeout 3 mosquitto_sub -h 127.0.0.1 -t 'furnace/data' -C 1 2>/dev/null)
 if [ $? -eq 0 ] && [ -n "$MQTT_DATA" ]; then
-    echo -e "  ${GREEN}${CHECK}${NC} ESP32 publishing to 'furnace/data'"
-    echo -e "  ${BLUE}  Latest data:${NC}"
+    # Check if timestamp is recent (within last 2 minutes)
+    msg_timestamp=$(echo "$MQTT_DATA" | jq -r '.timestamp // 0' 2>/dev/null)
+    current_time=$(date +%s)
 
-    # Parse and display JSON fields nicely
-    temp=$(echo "$MQTT_DATA" | jq -r '.temp // "N/A"' 2>/dev/null)
-    cjtemp=$(echo "$MQTT_DATA" | jq -r '.cjtemp // "N/A"' 2>/dev/null)
-    flame=$(echo "$MQTT_DATA" | jq -r '.flame // "N/A"' 2>/dev/null)
-    pressure_in=$(echo "$MQTT_DATA" | jq -r '.pressure_inlet // "N/A"' 2>/dev/null)
-    pressure_out=$(echo "$MQTT_DATA" | jq -r '.pressure_outlet // "N/A"' 2>/dev/null)
-    heap=$(echo "$MQTT_DATA" | jq -r '.heap // "N/A"' 2>/dev/null)
-
-    if [ "$temp" != "N/A" ]; then
-        echo -e "    • Furnace temp: ${temp}°F"
-        echo -e "    • Cold junction: ${cjtemp}°C"
-        echo -e "    • Flame sensor: ${flame}V"
-        echo -e "    • Pressure (in/out): ${pressure_in}/${pressure_out} PSI"
-        echo -e "    • Free heap: ${heap} bytes"
+    # Handle both seconds and milliseconds timestamps
+    if [ "$msg_timestamp" -gt 1000000000000 ] 2>/dev/null; then
+        # Milliseconds - convert to seconds
+        msg_time_sec=$((msg_timestamp / 1000))
     else
-        echo "$MQTT_DATA"
+        msg_time_sec=$msg_timestamp
     fi
+
+    time_diff=$((current_time - msg_time_sec))
+
+    if [ "$time_diff" -ge 0 ] && [ "$time_diff" -lt 120 ]; then
+        echo -e "  ${GREEN}${CHECK}${NC} ESP32 publishing to 'furnace/data'"
+    else
+        echo -e "  ${RED}${CROSS}${NC} ESP32 data is STALE (timestamp: ${msg_timestamp})"
+        echo -e "  ${YELLOW}  ESP32 may be offline or stuck in boot loop${NC}"
+        ALL_HEALTHY=false
+    fi
+
+    echo -e "  ${BLUE}  Latest data:${NC}"
+    echo "$MQTT_DATA"
 else
     echo -e "  ${RED}${CROSS}${NC} ESP32 MQTT data - ${RED}NO DATA${NC}"
     echo -e "  ${YELLOW}  Check if ESP32 is powered on and connected to WiFi${NC}"
     ALL_HEALTHY=false
+fi
+
+# Check ESP32 serial output
+if [ -e /dev/ttyUSB0 ]; then
+    echo -e "  ${BLUE}  Recent serial output:${NC}"
+    stty -F /dev/ttyUSB0 115200 2>/dev/null
+    SERIAL_OUT=$(timeout 2 cat /dev/ttyUSB0 2>/dev/null | head -10)
+    if [ -n "$SERIAL_OUT" ]; then
+        echo "$SERIAL_OUT" | sed 's/^/    /'
+    else
+        echo -e "    ${YELLOW}(no output)${NC}"
+    fi
 fi
 echo ""
 

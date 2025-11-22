@@ -1,0 +1,174 @@
+# Vector Configuration for Sensor Pipeline
+# Primary data pipeline: ESP32 furnace → MQTT → VictoriaMetrics
+
+# =============================================================================
+# API - Observability and Health Checks
+# =============================================================================
+[api]
+enabled = true
+address = "127.0.0.1:8686"
+
+# =============================================================================
+# SOURCES
+# =============================================================================
+
+# ESP32 Furnace Data via MQTT
+[sources.furnace_mqtt]
+type = "mqtt"
+host = "127.0.0.1"
+port = 1883
+topic = "furnace/data"
+
+# ESP32 Pressure Sensor via Serial (USB)
+[sources.pressure_serial]
+type = "exec"
+command = ["cat", "/dev/ttyACM0"]
+mode = "streaming"
+
+# BME680 Environmental Sensor - 10Hz streaming
+[sources.bme680]
+type = "exec"
+command = ["sh", "-c", "while true; do t=$(cat /sys/bus/i2c/devices/1-0077/iio:device0/in_temp_input); p=$(cat /sys/bus/i2c/devices/1-0077/iio:device0/in_pressure_input); h=$(cat /sys/bus/i2c/devices/1-0077/iio:device0/in_humidityrelative_input); echo \"{\\\"temp\\\":$$t,\\\"pressure\\\":$$p,\\\"humidity\\\":$$h}\"; sleep 0.1; done"]
+mode = "streaming"
+
+# =============================================================================
+# TRANSFORMS
+# =============================================================================
+
+# Parse furnace MQTT JSON data
+[transforms.parse_furnace]
+type = "remap"
+inputs = ["furnace_mqtt"]
+source = '''
+parsed, err = parse_json(.message)
+if err != null {
+  abort
+}
+. = parsed
+.measurement = "furnace"
+.host = "piiot"
+'''
+
+# Parse pressure sensor JSON from ESP32 serial
+[transforms.parse_pressure]
+type = "remap"
+inputs = ["pressure_serial"]
+source = '''
+# Try to parse JSON, skip non-JSON lines
+parsed, err = parse_json(.message)
+if err != null {
+  abort
+}
+. = parsed
+'''
+
+# Parse BME680 JSON readings
+[transforms.parse_bme680]
+type = "remap"
+inputs = ["bme680"]
+source = '''
+parsed, err = parse_json(.message)
+if err != null {
+  abort
+}
+
+.measurement = "environment"
+.host = "piiot"
+.temperature = to_float!(parsed.temp) / 1000.0
+.pressure = to_float!(parsed.pressure) / 1000.0
+.humidity = to_float!(parsed.humidity) / 1000.0
+
+del(.message)
+'''
+
+# =============================================================================
+# TRANSFORMS - ILP Formatting for QuestDB
+# =============================================================================
+
+# Format furnace data as InfluxDB Line Protocol
+[transforms.furnace_to_ilp]
+type = "remap"
+inputs = ["parse_furnace"]
+source = '''
+# Build ILP line: measurement,tags fields timestamp
+# furnace,host=piiot temp_f=2320.5,flame_v=7.2,... timestamp_ns
+
+fields = []
+tags = "host=" + (string(.host) ?? "unknown")
+
+# Add all numeric fields (match ESP32 JSON field names)
+# Note: pressure moved to separate ESP32-S3 via serial
+if exists(.furnace_temp) { fields = push(fields, "furnace_temp=" + to_string!(.furnace_temp)) }
+if exists(.cold_junction) { fields = push(fields, "cold_junction=" + to_string!(.cold_junction)) }
+if exists(.flame_voltage) { fields = push(fields, "flame_voltage=" + to_string!(.flame_voltage)) }
+if exists(.heap_bytes) { fields = push(fields, "heap_bytes=" + to_string!(.heap_bytes) + "i") }
+
+if length(fields) == 0 {
+  abort
+}
+
+# Nanosecond timestamp
+ts = to_unix_timestamp(now(), unit: "nanoseconds")
+
+.message = "furnace," + tags + " " + join!(fields, ",") + " " + to_string(ts)
+'''
+
+# Format BME680 data as InfluxDB Line Protocol
+[transforms.bme680_to_ilp]
+type = "remap"
+inputs = ["parse_bme680"]
+source = '''
+fields = []
+tags = "host=" + (string(.host) ?? "unknown")
+
+if exists(.temperature) { fields = push(fields, "temperature=" + to_string!(.temperature)) }
+if exists(.pressure) { fields = push(fields, "pressure=" + to_string!(.pressure)) }
+if exists(.humidity) { fields = push(fields, "humidity=" + to_string!(.humidity)) }
+
+if length(fields) == 0 {
+  abort
+}
+
+ts = to_unix_timestamp(now(), unit: "nanoseconds")
+
+.message = "environment," + tags + " " + join!(fields, ",") + " " + to_string(ts)
+'''
+
+# Format pressure sensor data as ILP
+[transforms.pressure_to_ilp]
+type = "remap"
+inputs = ["parse_pressure"]
+source = '''
+fields = []
+tags = "host=piiot"
+
+# Pressure sensor fields from ESP32-S3 serial
+if exists(.pressure_inlet) { fields = push(fields, "pressure_inlet=" + to_string!(.pressure_inlet)) }
+if exists(.pressure_outlet) { fields = push(fields, "pressure_outlet=" + to_string!(.pressure_outlet)) }
+# Debug fields for calibration
+if exists(.inlet_v) { fields = push(fields, "inlet_v=" + to_string!(.inlet_v)) }
+if exists(.ref_v) { fields = push(fields, "ref_v=" + to_string!(.ref_v)) }
+if exists(.inlet_raw) { fields = push(fields, "inlet_raw=" + to_string!(.inlet_raw) + "i") }
+
+if length(fields) == 0 {
+  abort
+}
+
+ts = to_unix_timestamp(now(), unit: "nanoseconds")
+
+.message = "pressure," + tags + " " + join!(fields, ",") + " " + to_string(ts)
+'''
+
+# =============================================================================
+# SINKS
+# =============================================================================
+
+# VictoriaMetrics output via InfluxDB Line Protocol (HTTP)
+[sinks.victoriametrics]
+type = "http"
+inputs = ["furnace_to_ilp", "bme680_to_ilp", "pressure_to_ilp"]
+uri = "http://127.0.0.1:8428/write"
+method = "post"
+
+[sinks.victoriametrics.encoding]
+codec = "text"

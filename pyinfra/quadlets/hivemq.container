@@ -1,5 +1,5 @@
 [Unit]
-Description=HiveMQ Edge MQTT Broker Container
+Description=HiveMQ Edge MQTT Broker
 After=network-online.target
 Wants=network-online.target
 
@@ -9,6 +9,10 @@ Image=docker.io/hivemq/hivemq-edge:latest
 PublishPort=1883:1883
 PublishPort=8080:8080
 Volume=%h/sensor-pipeline/data/hivemq:/opt/hivemq/data:Z
+
+[Service]
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=default.target
