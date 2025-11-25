@@ -64,11 +64,11 @@ class MAX31856:
 
         offset = data[0]
         temp = ((data[1] << 8) | data[2]) >> 2
-        temp = offset + temp
 
         if data[1] & 0x80:
             temp -= 0x4000
 
+        temp = offset + temp
         return temp * 0.015625
 
     def _handle_fault(self, fault):
@@ -104,9 +104,9 @@ class MAX31856:
 
     def send_byte(self, byte):
         for _ in range(8):
-            self.clk.value(1)
             self.mosi.value(1 if byte & 0x80 else 0)
             byte <<= 1
+            self.clk.value(1)
             self.clk.value(0)
 
     def recv_byte(self):
