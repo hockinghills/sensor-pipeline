@@ -1,0 +1,259 @@
+# CodeRabbit Configuration for Lyon's Pyre Glasswerks Furnace Monitoring
+# https://docs.coderabbit.ai/configuration/
+
+version: 2
+
+language: en-US
+
+tone_instructions: |
+  Research-grade 24/7 furnace monitoring (2300°F). Focus on critical bugs: hardware communication failures, data integrity issues, system lockups, incorrect temperature readings. Be direct and technical. See EMBEDDED_GUIDELINES.md.
+
+early_access: true
+
+reviews:
+  profile: assertive
+  
+  request_changes_workflow: true
+  
+  high_level_summary: true
+  high_level_summary_placeholder: '@coderabbitai summary'
+  
+  poem: false
+  
+  review_status: true
+  
+  collapse_walkthrough: false
+  
+  sequence_diagrams: true
+  
+  changed_files_summary: true
+  
+  labeling_instructions: []
+  
+  path_filters:
+    # Exclude generated files and dependencies
+    - '!**/__pycache__/**'
+    - '!**/node_modules/**'
+    - '!**/*.min.js'
+    - '!**/*.lock'
+    - '!**/poetry.lock'
+    - '!**/package-lock.json'
+  
+  path_instructions:
+    #---------------------------------------------------------------------------
+    # MICROPYTHON FIRMWARE
+    #---------------------------------------------------------------------------
+    - path: 'firmware/**/*.py'
+      instructions: |
+        ## MicroPython Embedded Code Review
+        
+        **Hardware Platform:** ESP32-S3 N16R8 (dual-core 240MHz, 16MB flash, 8MB PSRAM)
+        
+        **Reference Documents:**
+        - See `docs/hardware/esp32-s3-n16r8-hardware-reference.md` for MCU capabilities
+        - See `docs/hardware/max31856-esp32s3-hardware-reference.md` for thermocouple interface
+        - See `docs/hardware/ads1115-esp32s3-hardware-reference.md` for ADC specifications
+        
+        ### CRITICAL: Check for these bugs
+        
+        **SPI Communication (MAX31856):**
+        - SPI mode MUST be 1 or 3 (CPHA=1 required)
+        - Data must be stable BEFORE clock edge, not after
+        - CS timing: 100ns setup, 100ns hold, 400ns between transactions
+        - Bit 7 of address byte: 0=read, 1=write
+        
+        **I2C Communication (ADS1115):**
+        - Default address is 0x48 (7-bit), not 0x90
+        - Register reads require pointer write first
+        - Conversion time depends on data rate setting
+        - OS bit: write 1 to start, reads 0 during conversion, 1 when done
+        
+        **Two's Complement Handling:**
+        - Sign bit must be checked AFTER combining bytes and shifting
+        - MAX31856 cold junction: 14-bit signed, sign at bit 13
+        - MAX31856 thermocouple: 19-bit signed, sign at bit 18
+        - ADS1115: 16-bit signed, sign at bit 15
+        
+        **Temperature Calculations:**
+        - MAX31856 CJ: raw × 0.015625°C (after >>2 shift)
+        - MAX31856 TC: raw × 0.0078125°C (after >>5 shift)
+        - ADS1115: voltage = code × (FSR / 32768)
+        - Verify units are consistent (°C vs °F, mV vs V)
+        
+        ### Memory: What's Actually Available
+        
+        **DO NOT flag as excessive:**
+        - Buffers up to several MB (8MB PSRAM available)
+        - Pre-allocated sensor data arrays
+        - In-memory data buffering for network resilience
+        - Multiple simultaneous sensor handlers
+        
+        **DO flag:**
+        - Unbounded growth (lists that grow forever without cleanup)
+        - Allocations inside tight loops or ISRs
+        - Large allocations in SRAM when PSRAM would work
+        
+        ### Required Patterns
+        
+        **All hardware operations must have:**
+        - Try/except around I2C/SPI transactions
+        - Timeout handling for bus operations
+        - Validation of returned data (range checks, CRC where applicable)
+        - Logging of failures for diagnostics
+        
+        **Initialization sequences must:**
+        - Configure GPIO before use
+        - Verify device presence (I2C scan, register read-back)
+        - Set known-good configuration before starting conversions
+        - Include appropriate delays for device startup
+        
+        **Network operations must:**
+        - Handle WiFi disconnection gracefully
+        - Implement retry logic with backoff
+        - Not block sensor acquisition during network issues
+        - Buffer data locally when network is unavailable
+        
+        ### Reliability Concerns
+        
+        **Check for:**
+        - Blocking operations that could freeze monitoring
+        - Missing watchdog feeds in long operations
+        - Race conditions in interrupt handlers
+        - Shared state modified without protection
+        - Resources not released on error paths
+        
+        **This system monitors a 2300°F furnace 24/7. Lockups are not acceptable.**
+
+    #---------------------------------------------------------------------------
+    # ARDUINO/C++ FIRMWARE (ESP32 DevKitC-VE)
+    #---------------------------------------------------------------------------
+    - path: 'firmware/arduinocc/**/*.{ino,cpp,h,c}'
+      instructions: |
+        ## Arduino/C++ Embedded Code Review
+
+        **Hardware Platform:** ESP32 DevKitC-VE (original ESP32, dual-core Xtensa LX6)
+
+        **Reference Documents:**
+        - See `docs/hardware/esp32-devkitc-ve-hardware-reference.md` for MCU capabilities
+        - ADC1 channels: GPIO32-39 (always available)
+        - ADC2 channels: GPIO0,2,4,12-15,25-27 (unavailable during WiFi)
+
+        **Additional C++ concerns:**
+        - Verify `volatile` on variables shared with ISRs
+        - Check for stack overflow risks in recursive functions
+        - Ensure proper use of IRAM_ATTR for ISR functions
+        - Watch for blocking in loop() that would starve other tasks
+        - Verify heap fragmentation won't accumulate over 24/7 operation
+        - Arduino String objects allocate on heap - prefer fixed char buffers
+
+    #---------------------------------------------------------------------------
+    # DATA PIPELINE CODE
+    #---------------------------------------------------------------------------
+    - path: 'pipeline/**/*.py'
+      instructions: |
+        ## Data Pipeline Code Review
+        
+        This code handles telemetry from the furnace monitoring system.
+        
+        **Data Integrity:**
+        - Verify timestamps are preserved through the pipeline
+        - Check for data loss paths (what happens if a stage fails?)
+        - Ensure sensor IDs are tracked with readings
+        - Validate data format consistency
+        
+        **Reliability:**
+        - Pipeline should handle malformed input gracefully
+        - Backpressure handling when downstream is slow
+        - Recovery after restart (don't lose buffered data)
+        
+        **Performance:**
+        - This processes high-frequency sensor data
+        - Batching is appropriate and expected
+        - Memory usage for buffering is acceptable
+
+    #---------------------------------------------------------------------------
+    # GRAFANA/DASHBOARD CONFIGURATION
+    #---------------------------------------------------------------------------
+    - path: 'dashboards/**/*.{json,yaml,yml}'
+      instructions: |
+        ## Dashboard Configuration Review
+        
+        **Check for:**
+        - Query efficiency (avoid expensive queries on high-cardinality data)
+        - Appropriate time ranges and refresh intervals
+        - Alert thresholds that make sense for furnace operation
+        - Panel titles and units are clear and correct
+
+    #---------------------------------------------------------------------------
+    # TEST CODE
+    #---------------------------------------------------------------------------
+    - path: 'tests/**/*.py'
+      instructions: |
+        ## Test Code Review
+        
+        **Embedded Testing Considerations:**
+        - Hardware mocking should match real device behavior
+        - Test edge cases: sensor failures, communication errors, out-of-range values
+        - Include timing-sensitive test cases where relevant
+        - Test recovery paths, not just happy paths
+        
+        **Coverage:**
+        - Two's complement conversion edge cases (positive, negative, zero, limits)
+        - Communication error handling
+        - Configuration validation
+
+    #---------------------------------------------------------------------------
+    # HARDWARE REFERENCE DOCUMENTATION
+    #---------------------------------------------------------------------------
+    - path: 'docs/hardware/**/*.md'
+      instructions: |
+        ## Hardware Reference Documentation Review
+        
+        These documents are authoritative references for code review.
+        
+        **Check for:**
+        - Accuracy against manufacturer datasheets
+        - Completeness of critical specifications
+        - Clear examples for common operations
+        - Explicit documentation of edge cases and gotchas
+        
+        **Do not suggest:**
+        - Removing "obvious" information (it's there for AI context)
+        - Shortening examples (verbosity is intentional)
+
+    #---------------------------------------------------------------------------
+    # CONFIGURATION FILES
+    #---------------------------------------------------------------------------
+    - path: 'config/**/*.{yaml,yml,json,toml}'
+      instructions: |
+        ## Configuration Review
+        
+        **Check for:**
+        - Sensor addresses match hardware documentation
+        - Timing values are within device specifications
+        - Network timeouts are reasonable for industrial environment
+        - No hardcoded secrets (should use environment variables)
+
+  auto_review:
+    enabled: true
+    
+    # Only auto-review on these events
+    drafts: false
+    
+    # Base branches to review PRs against
+    base_branches:
+      - main
+      - develop
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: auto
+  
+  issues:
+    scope: auto
+  
+  # Pull in project documentation for context
+  opt_out: false
