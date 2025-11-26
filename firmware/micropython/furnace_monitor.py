@@ -166,6 +166,7 @@ class FurnaceMonitor:
 
         self.wifi_connected = False
         self.udp_sock = None
+        self.last_wifi_check = 0  # Track when we last attempted WiFi reconnection
 
     def init(self, max_retries=3):
         """
@@ -255,6 +256,53 @@ class FurnaceMonitor:
                         time.sleep(1)
 
         print("\n=== Initialization Complete ===\n")
+
+    def cleanup(self):
+        """
+        Clean up resources before restart.
+        """
+        print("Cleaning up resources...")
+
+        # Close UDP socket
+        if self.udp_sock:
+            try:
+                self.udp_sock.close()
+                print("  UDP socket closed")
+            except Exception as e:
+                print(f"  UDP socket close failed: {e}")
+            self.udp_sock = None
+
+        # Deinit I2C buses
+        if self.flame_i2c:
+            try:
+                self.flame_i2c.deinit()
+                print("  Flame I2C deinitialized")
+            except Exception as e:
+                print(f"  Flame I2C deinit failed: {e}")
+            self.flame_i2c = None
+            self.flame_adc = None
+
+        if self.control_i2c:
+            try:
+                self.control_i2c.deinit()
+                print("  Control I2C deinitialized")
+            except Exception as e:
+                print(f"  Control I2C deinit failed: {e}")
+            self.control_i2c = None
+            self.control_adc = None
+
+        # Disconnect WiFi
+        if self.wifi_connected:
+            try:
+                wlan = network.WLAN(network.STA_IF)
+                wlan.disconnect()
+                wlan.active(False)
+                print("  WiFi disconnected")
+            except Exception as e:
+                print(f"  WiFi disconnect failed: {e}")
+            self.wifi_connected = False
+
+        print("Cleanup complete")
 
     def read_flame_spectrum(self, samples=512):
         """
@@ -386,7 +434,7 @@ class FurnaceMonitor:
 
     def send_data(self, timestamp, flame_analysis, ctrl_voltage, ctrl_percent, ctrl_ma):
         """
-        Send data via UDP to Vector with WiFi reconnection.
+        Send data via UDP to Vector (non-blocking).
 
         Args:
             timestamp: Unix timestamp
@@ -398,13 +446,11 @@ class FurnaceMonitor:
         if not self.udp_sock:
             return
 
-        # Check WiFi status and attempt reconnection if needed
+        # Check WiFi status without blocking reconnection
         wlan = network.WLAN(network.STA_IF)
-        if not wlan.isconnected() and self.ssid:
-            print("WiFi disconnected, attempting reconnect...")
-            self.wifi_connected = setup_wifi(self.ssid, self.password)
-            if not self.wifi_connected:
-                return  # Will retry next cycle
+        if not wlan.isconnected():
+            self.wifi_connected = False
+            return  # Skip send, reconnection will happen in monitor loop
 
         try:
             # JSON format for Vector
@@ -462,13 +508,27 @@ class FurnaceMonitor:
                     except Exception as e:
                         print(f"! Watchdog feed failed: {e}")
 
+                # Check WiFi and attempt reconnection if needed (outside sensor read path)
+                if not self.wifi_connected and self.ssid:
+                    # Limit reconnection attempts (every 10 seconds)
+                    if timestamp - self.last_wifi_check > 10:
+                        self.last_wifi_check = timestamp
+                        print("WiFi disconnected, attempting reconnect...")
+                        try:
+                            self.wifi_connected = setup_wifi(self.ssid, self.password)
+                        except Exception as e:
+                            print(f"! WiFi reconnect failed: {e}")
+
                 # Initialize default values in case of errors
                 ctrl_voltage, ctrl_percent, ctrl_ma = 0.0, 0.0, 0.0
                 flame_analysis = {
                     'status': 'error',
                     'flicker_peak_freq': 0,
+                    'flicker_peak_mag': 0,
                     'thermoacoustic_peak_freq': 0,
-                    'warnings': []
+                    'thermoacoustic_peak_mag': 0,
+                    'rms_amplitude': 0,
+                    'warnings': ['Sensor read failed']
                 }
 
                 loop_success = True

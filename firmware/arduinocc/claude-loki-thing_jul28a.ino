@@ -61,13 +61,16 @@ struct NetworkMetrics {
 
 unsigned long lastNetworkMetricsTime = 0;
 const unsigned long networkMetricsInterval = 5000; // 5 seconds
-unsigned long pingStartTime = 0;
-bool awaitingPong = false;
 
 // --- MQTT Health Tracking ---
-int consecutivePongFailures = 0;
+struct MqttHealthMetrics {
+  int consecutivePongFailures = 0;
+  unsigned long lastMqttConnectAttempt = 0;
+  bool awaitingPong = false;
+  unsigned long pingStartTime = 0;
+} mqttHealth;
+
 const int MAX_PONG_FAILURES = 3;  // Force reconnect after this many failures
-unsigned long lastMqttConnectAttempt = 0;
 const unsigned long MQTT_RECONNECT_COOLDOWN = 5000;  // Don't spam reconnects
 
 // --- Variables ---
@@ -225,34 +228,51 @@ void loop() {
 void forceDisconnectMQTT() {
     Serial.println(">>> Forcing MQTT disconnect");
     mqttClient.stop();
-    consecutivePongFailures = 0;
-    awaitingPong = false;
+
+    if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
+        mqttHealth.consecutivePongFailures = 0;
+        mqttHealth.awaitingPong = false;
+        xSemaphoreGive(metricsMutex);
+    }
 }
 
 bool checkMQTT() {
     unsigned long now = millis();
-    
-    // If we've had too many pong failures, force disconnect
-    if (consecutivePongFailures >= MAX_PONG_FAILURES) {
-        Serial.print("!!! ");
-        Serial.print(consecutivePongFailures);
-        Serial.println(" consecutive pong failures - forcing reconnect");
-        forceDisconnectMQTT();
+
+    // Check if we've had too many pong failures
+    if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
+        int failures = mqttHealth.consecutivePongFailures;
+        xSemaphoreGive(metricsMutex);
+
+        if (failures >= MAX_PONG_FAILURES) {
+            Serial.print("!!! ");
+            Serial.print(failures);
+            Serial.println(" consecutive pong failures - forcing reconnect");
+            forceDisconnectMQTT();
+        }
     }
-    
+
     if (!mqttClient.connected()) {
-        // Don't spam reconnect attempts
-        if (now - lastMqttConnectAttempt < MQTT_RECONNECT_COOLDOWN) {
+        // Don't spam reconnect attempts (check with mutex)
+        bool shouldReconnect = false;
+        if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
+            if (now - mqttHealth.lastMqttConnectAttempt >= MQTT_RECONNECT_COOLDOWN) {
+                mqttHealth.lastMqttConnectAttempt = now;
+                shouldReconnect = true;
+            }
+            xSemaphoreGive(metricsMutex);
+        }
+
+        if (!shouldReconnect) {
             return false;
         }
-        lastMqttConnectAttempt = now;
-        
+
         Serial.print("MQTT connecting to ");
         Serial.print(broker);
         Serial.print(":");
         Serial.print(port);
         Serial.print("... ");
-        
+
         if (mqttClient.connect(broker, port)) {
             Serial.println("SUCCESS!");
 
@@ -260,13 +280,13 @@ bool checkMQTT() {
             mqttClient.subscribe("furnace/pong");
             Serial.println("Subscribed to furnace/pong");
 
-            // Track reconnection (mutex protected)
+            // Track reconnection and reset failures (mutex protected)
             if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
                 netMetrics.mqttReconnectCount++;
+                mqttHealth.consecutivePongFailures = 0;
                 xSemaphoreGive(metricsMutex);
             }
-            
-            consecutivePongFailures = 0;
+
             return true;
         } else {
             Serial.print("FAILED! Error code: ");
@@ -283,20 +303,21 @@ void onMqttMessage(int messageSize) {
     String topic = mqttClient.messageTopic();
     Serial.print("MQTT message received on topic: ");
     Serial.println(topic);
-    
-    if (awaitingPong && topic == "furnace/pong") {
-        unsigned long latency = millis() - pingStartTime;
-        Serial.print("Pong received! Latency: ");
-        Serial.print(latency);
-        Serial.println("ms");
 
+    if (topic == "furnace/pong") {
         if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
-            netMetrics.lastLatencyMs = latency;
+            if (mqttHealth.awaitingPong) {
+                unsigned long latency = millis() - mqttHealth.pingStartTime;
+                Serial.print("Pong received! Latency: ");
+                Serial.print(latency);
+                Serial.println("ms");
+
+                netMetrics.lastLatencyMs = latency;
+                mqttHealth.awaitingPong = false;
+                mqttHealth.consecutivePongFailures = 0;  // Reset failure counter on success
+            }
             xSemaphoreGive(metricsMutex);
         }
-
-        awaitingPong = false;
-        consecutivePongFailures = 0;  // Reset failure counter on success
     }
 }
 
@@ -496,28 +517,38 @@ const char* getWiFiStatusString() {
 void performLatencyTest() {
     // Reset if pong timeout exceeded (5 seconds)
     const unsigned long PONG_TIMEOUT_MS = 5000;
-    if (awaitingPong && (millis() - pingStartTime > PONG_TIMEOUT_MS)) {
-        consecutivePongFailures++;
-        Serial.print("Pong timeout - resetting latency test (failure ");
-        Serial.print(consecutivePongFailures);
-        Serial.print("/");
-        Serial.print(MAX_PONG_FAILURES);
-        Serial.println(")");
-        awaitingPong = false;
-        
-        if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
+    unsigned long now = millis();
+    bool shouldSendPing = false;
+    unsigned long pingTime = 0;
+
+    if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
+        if (mqttHealth.awaitingPong && (now - mqttHealth.pingStartTime > PONG_TIMEOUT_MS)) {
+            mqttHealth.consecutivePongFailures++;
+            Serial.print("Pong timeout - resetting latency test (failure ");
+            Serial.print(mqttHealth.consecutivePongFailures);
+            Serial.print("/");
+            Serial.print(MAX_PONG_FAILURES);
+            Serial.println(")");
+            mqttHealth.awaitingPong = false;
             netMetrics.lastLatencyMs = 0;  // Indicate timeout
-            xSemaphoreGive(metricsMutex);
         }
+
+        if (!mqttHealth.awaitingPong) {
+            mqttHealth.pingStartTime = now;
+            mqttHealth.awaitingPong = true;
+            shouldSendPing = true;
+            pingTime = now;
+        }
+
+        xSemaphoreGive(metricsMutex);
     }
 
-    if (!awaitingPong) {
-        pingStartTime = millis();
-        awaitingPong = true;
-
-        // Send ping message
+    if (shouldSendPing) {
+        // Send ping message using fixed buffer to avoid heap fragmentation
+        char pingPayload[32];
+        snprintf(pingPayload, sizeof(pingPayload), "{\"ping\":%lu}", pingTime);
         mqttClient.beginMessage("furnace/ping", false, 0);
-        mqttClient.print("{\"ping\":" + String(pingStartTime) + "}");
+        mqttClient.print(pingPayload);
         if (!mqttClient.endMessage()) {
             Serial.println("Failed to send ping!");
         }

@@ -29,14 +29,15 @@ def run_monitor():
     """Run monitor with exception recovery."""
     # Enable watchdog timer
     wdt = WDT(timeout=WDT_TIMEOUT_MS)
-    print("Watchdog enabled: {} second timeout".format(WDT_TIMEOUT_MS // 1000))
+    print(f"Watchdog enabled: {WDT_TIMEOUT_MS // 1000} second timeout")
 
     # Infinite loop with crash recovery
     restart_count = 0
 
     while True:
+        fm = None
         try:
-            print("\n=== Starting furnace monitor (restart #{}) ===".format(restart_count))
+            print(f"\n=== Starting furnace monitor (restart #{restart_count}) ===")
 
             # Create and initialize monitor
             fm = FurnaceMonitor(
@@ -65,8 +66,16 @@ def run_monitor():
         except Exception as e:
             # Log crash and restart
             restart_count += 1
-            print("\n!!! CRASH DETECTED (restart #{}) !!!".format(restart_count))
-            print("Error: {}".format(e))
+            print(f"\n!!! CRASH DETECTED (restart #{restart_count}) !!!")
+            print(f"Error: {e}")
+
+            # Clean up resources before restart
+            if fm:
+                try:
+                    fm.cleanup()
+                except Exception as cleanup_error:
+                    print(f"! Cleanup failed: {cleanup_error}")
+
             print("Restarting in 5 seconds...")
 
             try:
