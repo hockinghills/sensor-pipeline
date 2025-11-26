@@ -219,13 +219,15 @@ class ADS1115:
     def read_raw(self, channel=0):
         """
         Read raw ADC value from single-ended channel.
-        
+
         Args:
             channel: Channel 0-3
-        
+
         Returns:
             int: Signed 16-bit value
         """
+        if not 0 <= channel <= 3:
+            raise ValueError(f"Invalid channel: {channel} (must be 0-3)")
         mux = (_MUX_SINGLE_0 + (channel << 12))
         config = (_OS_START | mux | self._gain | 
                   _MODE_SINGLE | self._rate | _COMP_DISABLE)
@@ -331,6 +333,12 @@ class ADS1115:
         rate_sps = self._get_rate_sps()
         conv_time_us = (1000000 // rate_sps) + 100
         time.sleep_us(conv_time_us)
+
+        # Discard first conversion (may contain stale data from previous mode)
+        try:
+            self.i2c.readfrom_mem_into(self.address, _REG_CONVERSION, self._buf2)
+        except OSError:
+            pass  # Ignore first read errors
 
         # Capture samples
         fsr = self._FSR_MAP[self._gain]

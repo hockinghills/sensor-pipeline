@@ -23,14 +23,23 @@ if ! command -v mpremote &> /dev/null; then
     exit 1
 fi
 
+# Validate source files exist
+for file in ads1115.py furnace_monitor.py main.py; do
+    if [ ! -f "$file" ]; then
+        echo "ERROR: $file not found in current directory"
+        echo "Run this script from: firmware/micropython/"
+        exit 1
+    fi
+done
+
 echo "Copying ads1115.py driver..."
-mpremote connect $DEVICE fs cp ads1115.py :ads1115.py
+mpremote connect "$DEVICE" fs cp ads1115.py :ads1115.py
 
 echo "Copying furnace_monitor.py..."
-mpremote connect $DEVICE fs cp furnace_monitor.py :furnace_monitor.py
+mpremote connect "$DEVICE" fs cp furnace_monitor.py :furnace_monitor.py
 
 echo "Copying main.py (auto-run on boot)..."
-mpremote connect $DEVICE fs cp main.py :main.py
+mpremote connect "$DEVICE" fs cp main.py :main.py
 
 echo ""
 echo "=== Deployment Complete ==="

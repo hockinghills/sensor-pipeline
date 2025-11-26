@@ -91,10 +91,12 @@ def setup_wifi(ssid, password):
             s = socket.socket()
             s.settimeout(3.0)
             start = time.ticks_ms()
-            s.connect(('8.8.8.8', 53))
-            s.close()
-            ping_time = time.ticks_diff(time.ticks_ms(), start)
-            print(f"Internet OK: {ping_time} ms to Google DNS")
+            try:
+                s.connect(('8.8.8.8', 53))
+                ping_time = time.ticks_diff(time.ticks_ms(), start)
+                print(f"Internet OK: {ping_time} ms to Google DNS")
+            finally:
+                s.close()
         except Exception as e:
             print(f"Internet test failed: {e}")
 
@@ -199,6 +201,11 @@ class FurnaceMonitor:
                                     sda=Pin(self.FLAME_SDA),
                                     freq=400000)
 
+                # Verify device presence
+                devices = self.flame_i2c.scan()
+                if self.FLAME_ADDR not in devices:
+                    raise RuntimeError(f"Flame ADC not found at 0x{self.FLAME_ADDR:02X}, found: {[hex(d) for d in devices]}")
+
                 self.flame_adc = ADS1115(self.flame_i2c, address=self.FLAME_ADDR)
                 self.flame_adc.init(gain=ADS1115.GAIN_4096, rate=ADS1115.RATE_860)
                 print("  Flame sensor initialized")
@@ -218,6 +225,11 @@ class FurnaceMonitor:
                                       scl=Pin(self.CONTROL_SCL),
                                       sda=Pin(self.CONTROL_SDA),
                                       freq=400000)
+
+                # Verify device presence
+                devices = self.control_i2c.scan()
+                if self.CONTROL_ADDR not in devices:
+                    raise RuntimeError(f"Control ADC not found at 0x{self.CONTROL_ADDR:02X}, found: {[hex(d) for d in devices]}")
 
                 self.control_adc = ADS1115(self.control_i2c, address=self.CONTROL_ADDR)
                 self.control_adc.init(gain=ADS1115.GAIN_2048, rate=ADS1115.RATE_128)
@@ -315,7 +327,7 @@ class FurnaceMonitor:
                     results['thermoacoustic_peak_freq'] = f
 
         # RMS amplitude
-        rms = math.sqrt(sum(m**2 for m in magnitudes) / len(magnitudes))
+        rms = math.sqrt(sum(m**2 for m in magnitudes) / len(magnitudes)) if magnitudes else 0.0
         results['rms_amplitude'] = rms
 
         # Check for minimum signal threshold (reject noise on floating inputs)
@@ -346,12 +358,21 @@ class FurnaceMonitor:
 
     def read_control_signal(self):
         """
-        Read 4-20mA control signal.
+        Read 4-20mA control signal with range validation.
 
         Returns:
             tuple: (voltage, percent, milliamps)
+
+        Raises:
+            ValueError: If voltage reading is out of expected range
         """
         voltage = self.control_adc.read_differential(pos=0, neg=1)
+
+        # Validate reading - 4-20mA across 100Ω = 0.4V-2.0V expected
+        # Allow small margin for ADC tolerance
+        if voltage < -0.1 or voltage > 2.5:
+            raise ValueError(f"Control signal out of range: {voltage:.3f}V (expect 0.4-2.0V)")
+
         ma = (voltage / self.SENSE_RESISTANCE) * 1000.0
 
         if ma < self.MA_MIN:
@@ -365,7 +386,7 @@ class FurnaceMonitor:
 
     def send_data(self, timestamp, flame_analysis, ctrl_voltage, ctrl_percent, ctrl_ma):
         """
-        Send data via UDP to Vector.
+        Send data via UDP to Vector with WiFi reconnection.
 
         Args:
             timestamp: Unix timestamp
@@ -376,6 +397,14 @@ class FurnaceMonitor:
         """
         if not self.udp_sock:
             return
+
+        # Check WiFi status and attempt reconnection if needed
+        wlan = network.WLAN(network.STA_IF)
+        if not wlan.isconnected() and self.ssid:
+            print("WiFi disconnected, attempting reconnect...")
+            self.wifi_connected = setup_wifi(self.ssid, self.password)
+            if not self.wifi_connected:
+                return  # Will retry next cycle
 
         try:
             # JSON format for Vector
@@ -469,13 +498,20 @@ class FurnaceMonitor:
                     error_count += 1
                     loop_success = False
 
-                # Track consecutive errors
+                # Track consecutive errors and attempt recovery
                 if loop_success:
                     consecutive_errors = 0
                 else:
                     consecutive_errors += 1
                     if consecutive_errors >= 10:
-                        print(f"! WARNING: {consecutive_errors} consecutive errors - possible hardware failure")
+                        print(f"! WARNING: {consecutive_errors} consecutive errors - attempting hardware recovery")
+                        try:
+                            # Re-initialize I2C buses to clear potential lockup
+                            self.init(max_retries=1)
+                            consecutive_errors = 0
+                            print("  Hardware recovery successful")
+                        except Exception as e:
+                            print(f"! Hardware recovery failed: {e}")
 
                 # Display results
                 status = flame_analysis['status'].upper()
@@ -493,7 +529,17 @@ class FurnaceMonitor:
                 for warning in flame_analysis['warnings']:
                     print(f"         ! {warning}")
 
-                time.sleep(interval_sec)
+                # Sleep in small increments to feed watchdog
+                sleep_remaining = interval_sec
+                while sleep_remaining > 0:
+                    sleep_chunk = min(sleep_remaining, 0.5)  # 500ms max between feeds
+                    time.sleep(sleep_chunk)
+                    sleep_remaining -= sleep_chunk
+                    if watchdog:
+                        try:
+                            watchdog.feed()
+                        except Exception:
+                            pass
 
         except KeyboardInterrupt:
             print("\nMonitoring stopped")

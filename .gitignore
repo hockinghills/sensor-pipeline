@@ -1,5 +1,6 @@
 # Ignore sensitive files
 configs/influxdb_token.txt
+firmware/micropython/config.py
 *.log
 *.pid
 
