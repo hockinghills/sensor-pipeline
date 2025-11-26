@@ -19,13 +19,6 @@ host = "127.0.0.1"
 port = 1883
 topic = "furnace/data"
 
-# ESP32 Network Metrics via MQTT
-[sources.furnace_network_mqtt]
-type = "mqtt"
-host = "127.0.0.1"
-port = 1883
-topic = "furnace/network_metrics"
-
 # ESP32 Pressure Sensor via Serial (USB)
 [sources.pressure_serial]
 type = "exec"
@@ -37,6 +30,12 @@ mode = "streaming"
 type = "exec"
 command = ["sh", "-c", "while true; do t=$(cat /sys/bus/i2c/devices/1-0077/iio:device0/in_temp_input); p=$(cat /sys/bus/i2c/devices/1-0077/iio:device0/in_pressure_input); h=$(cat /sys/bus/i2c/devices/1-0077/iio:device0/in_humidityrelative_input); echo \"{\\\"temp\\\":$$t,\\\"pressure\\\":$$p,\\\"humidity\\\":$$h}\"; sleep 0.1; done"]
 mode = "streaming"
+
+# ESP32 Furnace Flame Dynamics via UDP
+[sources.furnace_udp]
+type = "socket"
+mode = "udp"
+address = "0.0.0.0:9000"
 
 # =============================================================================
 # TRANSFORMS
@@ -53,20 +52,6 @@ if err != null {
 }
 . = parsed
 .measurement = "furnace"
-.host = "piiot"
-'''
-
-# Parse network metrics MQTT JSON data
-[transforms.parse_network]
-type = "remap"
-inputs = ["furnace_network_mqtt"]
-source = '''
-parsed, err = parse_json(.message)
-if err != null {
-  abort
-}
-. = parsed
-.measurement = "network"
 .host = "piiot"
 '''
 
@@ -102,6 +87,41 @@ if err != null {
 del(.message)
 '''
 
+# Parse furnace UDP JSON data
+[transforms.parse_furnace_udp]
+type = "remap"
+inputs = ["furnace_udp"]
+source = '''
+parsed, err = parse_json(.message)
+if err != null {
+  abort
+}
+
+. = parsed
+
+# Extract nested flame data
+if exists(.flame) {
+  .flame_status = .flame.status
+  .flicker_freq = .flame.flicker_freq
+  .flicker_mag = .flame.flicker_mag
+  .thermo_freq = .flame.thermo_freq
+  .thermo_mag = .flame.thermo_mag
+  .flame_rms = .flame.rms
+  del(.flame)
+}
+
+# Extract nested control data
+if exists(.control) {
+  .control_voltage = .control.voltage
+  .control_percent = .control.percent
+  .control_ma = .control.milliamps
+  del(.control)
+}
+
+.measurement = "flame_dynamics"
+.host = "piiot"
+'''
+
 # =============================================================================
 # TRANSFORMS - ILP Formatting for QuestDB
 # =============================================================================
@@ -128,13 +148,8 @@ if length(fields) == 0 {
   abort
 }
 
-# Use ESP32 timestamp (milliseconds) if available, otherwise use current time
-# ESP32 provides Unix timestamp in milliseconds, convert to nanoseconds
-ts = if exists(.timestamp) {
-  to_int!(.timestamp) * 1000000
-} else {
-  to_unix_timestamp(now(), unit: "nanoseconds")
-}
+# Nanosecond timestamp
+ts = to_unix_timestamp(now(), unit: "nanoseconds")
 
 .message = "furnace," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
@@ -185,37 +200,42 @@ ts = to_unix_timestamp(now(), unit: "nanoseconds")
 .message = "pressure," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
 
-# Format network metrics as ILP
-[transforms.network_to_ilp]
+# Format flame dynamics UDP data as ILP
+[transforms.flame_udp_to_ilp]
 type = "remap"
-inputs = ["parse_network"]
+inputs = ["parse_furnace_udp"]
 source = '''
 fields = []
 tags = "host=" + (string(.host) ?? "unknown")
 
-# Network metrics from ESP32
-if exists(.wifi_rssi) { fields = push(fields, "wifi_rssi=" + to_string!(.wifi_rssi) + "i") }
-if exists(.connection_uptime_ms) { fields = push(fields, "connection_uptime_ms=" + to_string!(.connection_uptime_ms) + "i") }
-if exists(.mqtt_reconnects) { fields = push(fields, "mqtt_reconnects=" + to_string!(.mqtt_reconnects) + "i") }
-if exists(.wifi_reconnects) { fields = push(fields, "wifi_reconnects=" + to_string!(.wifi_reconnects) + "i") }
-if exists(.packets_sent) { fields = push(fields, "packets_sent=" + to_string!(.packets_sent) + "i") }
-if exists(.packets_lost) { fields = push(fields, "packets_lost=" + to_string!(.packets_lost) + "i") }
-if exists(.packet_loss_rate) { fields = push(fields, "packet_loss_rate=" + to_string!(.packet_loss_rate)) }
-if exists(.network_latency_ms) { fields = push(fields, "network_latency_ms=" + to_string!(.network_latency_ms) + "i") }
-if exists(.state_changes) { fields = push(fields, "state_changes=" + to_string!(.state_changes) + "i") }
+# Flame analysis fields
+if exists(.flicker_freq) { fields = push(fields, "flicker_freq=" + to_string!(.flicker_freq)) }
+if exists(.flicker_mag) { fields = push(fields, "flicker_mag=" + to_string!(.flicker_mag)) }
+if exists(.thermo_freq) { fields = push(fields, "thermo_freq=" + to_string!(.thermo_freq)) }
+if exists(.thermo_mag) { fields = push(fields, "thermo_mag=" + to_string!(.thermo_mag)) }
+if exists(.flame_rms) { fields = push(fields, "flame_rms=" + to_string!(.flame_rms)) }
 
-# Connection state as tag (categorical data)
-if exists(.connection_state) {
-  tags = tags + ",state=" + to_string!(.connection_state)
+# Control signal fields
+if exists(.control_voltage) { fields = push(fields, "control_voltage=" + to_string!(.control_voltage)) }
+if exists(.control_percent) { fields = push(fields, "control_percent=" + to_string!(.control_percent)) }
+if exists(.control_ma) { fields = push(fields, "control_ma=" + to_string!(.control_ma)) }
+
+# Add flame status as a tag
+if exists(.flame_status) {
+  tags = tags + ",status=" + to_string(.flame_status)
 }
 
 if length(fields) == 0 {
   abort
 }
 
+# Use timestamp from ESP32 if available, otherwise now
 ts = to_unix_timestamp(now(), unit: "nanoseconds")
+if exists(.timestamp) {
+  ts = to_int!(.timestamp) * 1000000000
+}
 
-.message = "network," + tags + " " + join!(fields, ",") + " " + to_string(ts)
+.message = "flame_dynamics," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
 
 # =============================================================================
@@ -225,7 +245,7 @@ ts = to_unix_timestamp(now(), unit: "nanoseconds")
 # VictoriaMetrics output via InfluxDB Line Protocol (HTTP)
 [sinks.victoriametrics]
 type = "http"
-inputs = ["furnace_to_ilp", "bme680_to_ilp", "pressure_to_ilp", "network_to_ilp"]
+inputs = ["furnace_to_ilp", "bme680_to_ilp", "pressure_to_ilp", "flame_udp_to_ilp"]
 uri = "http://127.0.0.1:8428/write"
 method = "post"
 

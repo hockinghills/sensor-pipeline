@@ -64,6 +64,12 @@ const unsigned long networkMetricsInterval = 5000; // 5 seconds
 unsigned long pingStartTime = 0;
 bool awaitingPong = false;
 
+// --- MQTT Health Tracking ---
+int consecutivePongFailures = 0;
+const int MAX_PONG_FAILURES = 3;  // Force reconnect after this many failures
+unsigned long lastMqttConnectAttempt = 0;
+const unsigned long MQTT_RECONNECT_COOLDOWN = 5000;  // Don't spam reconnects
+
 // --- Variables ---
 bool sensorAvailable = false;  // Flag to track sensor initialization status
 unsigned long lastMqttTime = 0;
@@ -94,7 +100,7 @@ void otaTask(void *parameter) {
 // CORE 1: Sensor & MQTT Task
 // ===========================================================================
 void sensorTask(void *parameter) {
-    // Add this critical task to watchdog (10 second timeout)
+    // Add this task to watchdog (10 second timeout)
     esp_task_wdt_add(NULL);
 
     for(;;) {
@@ -110,6 +116,8 @@ void sensorTask(void *parameter) {
                     lastMqttTime = currentMillis;
                 }
             }
+        } else {
+            Serial.println("WiFi disconnected in sensor task");
         }
 
         // Feed watchdog after successful sensor cycle
@@ -124,6 +132,7 @@ void setup() {
     Serial.begin(115200);
     delay(1500);
     Serial.println("=== ESP32 Furnace Monitor Starting ===");
+    Serial.println("Firmware: jul28a_fixed with MQTT health tracking");
 
     // Initialize mutex for shared variable protection
     metricsMutex = xSemaphoreCreateMutex();
@@ -181,7 +190,14 @@ void setup() {
         Serial.print(".");
         ArduinoCloud.update(); 
     }
-    Serial.println(" Connected.");
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println(" Connected!");
+        Serial.print("IP Address: ");
+        Serial.println(WiFi.localIP());
+    } else {
+        Serial.println(" WiFi connection timeout!");
+    }
 
     // 4. Time Sync
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
@@ -206,23 +222,57 @@ void loop() {
 
 // --- Helper Functions ---
 
+void forceDisconnectMQTT() {
+    Serial.println(">>> Forcing MQTT disconnect");
+    mqttClient.stop();
+    consecutivePongFailures = 0;
+    awaitingPong = false;
+}
+
 bool checkMQTT() {
+    unsigned long now = millis();
+    
+    // If we've had too many pong failures, force disconnect
+    if (consecutivePongFailures >= MAX_PONG_FAILURES) {
+        Serial.print("!!! ");
+        Serial.print(consecutivePongFailures);
+        Serial.println(" consecutive pong failures - forcing reconnect");
+        forceDisconnectMQTT();
+    }
+    
     if (!mqttClient.connected()) {
+        // Don't spam reconnect attempts
+        if (now - lastMqttConnectAttempt < MQTT_RECONNECT_COOLDOWN) {
+            return false;
+        }
+        lastMqttConnectAttempt = now;
+        
+        Serial.print("MQTT connecting to ");
+        Serial.print(broker);
+        Serial.print(":");
+        Serial.print(port);
+        Serial.print("... ");
+        
         if (mqttClient.connect(broker, port)) {
-            Serial.println("MQTT Connected");
+            Serial.println("SUCCESS!");
 
             // Subscribe to pong response (one-time on connect)
             mqttClient.subscribe("furnace/pong");
+            Serial.println("Subscribed to furnace/pong");
 
             // Track reconnection (mutex protected)
             if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
                 netMetrics.mqttReconnectCount++;
                 xSemaphoreGive(metricsMutex);
             }
-
+            
+            consecutivePongFailures = 0;
             return true;
+        } else {
+            Serial.print("FAILED! Error code: ");
+            Serial.println(mqttClient.connectError());
+            return false;
         }
-        return false;
     }
     return true;
 }
@@ -230,8 +280,15 @@ bool checkMQTT() {
  
 // Add MQTT message callback for latency measurement
 void onMqttMessage(int messageSize) {
-    if (awaitingPong && mqttClient.messageTopic() == "furnace/pong") {
+    String topic = mqttClient.messageTopic();
+    Serial.print("MQTT message received on topic: ");
+    Serial.println(topic);
+    
+    if (awaitingPong && topic == "furnace/pong") {
         unsigned long latency = millis() - pingStartTime;
+        Serial.print("Pong received! Latency: ");
+        Serial.print(latency);
+        Serial.println("ms");
 
         if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
             netMetrics.lastLatencyMs = latency;
@@ -239,6 +296,7 @@ void onMqttMessage(int messageSize) {
         }
 
         awaitingPong = false;
+        consecutivePongFailures = 0;  // Reset failure counter on success
     }
 }
 
@@ -255,15 +313,33 @@ void publishMqttData() {
     // Sensor data (existing)
     float tempC = max31856.readThermocoupleTemperature();
     float coldJunctionC = max31856.readCJTemperature();
+    
+    // Check for MAX31856 faults
+    uint8_t fault = max31856.readFault();
+    if (fault) {
+        Serial.print("MAX31856 Fault: 0x");
+        Serial.println(fault, HEX);
+        if (fault & MAX31856_FAULT_CJRANGE) Serial.println("  - Cold Junction Range Fault");
+        if (fault & MAX31856_FAULT_TCRANGE) Serial.println("  - Thermocouple Range Fault");
+        if (fault & MAX31856_FAULT_CJHIGH)  Serial.println("  - Cold Junction High Fault");
+        if (fault & MAX31856_FAULT_CJLOW)   Serial.println("  - Cold Junction Low Fault");
+        if (fault & MAX31856_FAULT_TCHIGH)  Serial.println("  - Thermocouple High Fault");
+        if (fault & MAX31856_FAULT_TCLOW)   Serial.println("  - Thermocouple Low Fault");
+        if (fault & MAX31856_FAULT_OVUV)    Serial.println("  - Over/Under Voltage Fault");
+        if (fault & MAX31856_FAULT_OPEN)    Serial.println("  - Thermocouple Open Fault");
+        max31856.clearFault();
+    }
 
     // Validate sensor readings
     if (isnan(tempC) || tempC < -100 || tempC > 1800) {
-        Serial.println("Invalid thermocouple reading, skipping publish");
+        Serial.print("Invalid thermocouple reading: ");
+        Serial.println(tempC);
         return;
     }
 
     if (isnan(coldJunctionC) || coldJunctionC < -40 || coldJunctionC > 150) {
-        Serial.println("Invalid cold junction reading, skipping publish");
+        Serial.print("Invalid cold junction reading: ");
+        Serial.println(coldJunctionC);
         return;
     }
 
@@ -271,11 +347,27 @@ void publishMqttData() {
 
     // Validate ADC reading
     if (raw_adc < 0 || raw_adc > 4095) {
-        Serial.println("Invalid ADC reading, skipping publish");
+        Serial.print("Invalid ADC reading: ");
+        Serial.println(raw_adc);
         return;
     }
 
     float flame_voltage = ((raw_adc / 4095.0f) * 3.3f) * VOLTAGE_DIVIDER_RATIO;
+    
+    // Debug output every 10th reading (roughly once per second at 10Hz)
+    static int debugCounter = 0;
+    if (++debugCounter >= 10) {
+        debugCounter = 0;
+        Serial.print("Temp: ");
+        Serial.print(tempC);
+        Serial.print("C, CJ: ");
+        Serial.print(coldJunctionC);
+        Serial.print("C, ADC: ");
+        Serial.print(raw_adc);
+        Serial.print(", Flame: ");
+        Serial.print(flame_voltage);
+        Serial.println("V");
+    }
     
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -296,6 +388,7 @@ void publishMqttData() {
     mqttClient.beginMessage("furnace/data", false, 0);
     mqttClient.print(sensorPayload);
     if (!mqttClient.endMessage()) {
+        Serial.println("MQTT publish failed!");
         if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
             netMetrics.packetsLost++;
             xSemaphoreGive(metricsMutex);
@@ -404,10 +497,18 @@ void performLatencyTest() {
     // Reset if pong timeout exceeded (5 seconds)
     const unsigned long PONG_TIMEOUT_MS = 5000;
     if (awaitingPong && (millis() - pingStartTime > PONG_TIMEOUT_MS)) {
-        Serial.println("Pong timeout - resetting latency test");
+        consecutivePongFailures++;
+        Serial.print("Pong timeout - resetting latency test (failure ");
+        Serial.print(consecutivePongFailures);
+        Serial.print("/");
+        Serial.print(MAX_PONG_FAILURES);
+        Serial.println(")");
         awaitingPong = false;
-        // Set latency to 0 to indicate timeout
-        // (Requires mutex protection when that's implemented)
+        
+        if (xSemaphoreTake(metricsMutex, portMAX_DELAY) == pdTRUE) {
+            netMetrics.lastLatencyMs = 0;  // Indicate timeout
+            xSemaphoreGive(metricsMutex);
+        }
     }
 
     if (!awaitingPong) {
@@ -417,8 +518,8 @@ void performLatencyTest() {
         // Send ping message
         mqttClient.beginMessage("furnace/ping", false, 0);
         mqttClient.print("{\"ping\":" + String(pingStartTime) + "}");
-        mqttClient.endMessage();
-
-        // Note: Subscribe to furnace/pong in checkMQTT() on connect, not here
+        if (!mqttClient.endMessage()) {
+            Serial.println("Failed to send ping!");
+        }
     }
 }

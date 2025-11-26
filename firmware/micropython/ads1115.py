@@ -163,7 +163,7 @@ class ADS1115:
         try:
             self._read_config()
         except OSError as e:
-            raise RuntimeError(f"ADS1115 communication failed: {e}")
+            raise RuntimeError(f"ADS1115 communication failed: {e}") from e
         
         print(f"ADS1115 initialized at 0x{self.address:02X}")
         print(f"  FSR: ±{self._FSR_MAP[self._gain]}V")
@@ -181,16 +181,25 @@ class ADS1115:
         """Write config register."""
         self._buf2[0] = (config >> 8) & 0xFF
         self._buf2[1] = config & 0xFF
-        self.i2c.writeto_mem(self.address, _REG_CONFIG, self._buf2)
+        try:
+            self.i2c.writeto_mem(self.address, _REG_CONFIG, self._buf2)
+        except OSError as e:
+            raise RuntimeError(f"ADS1115 I2C write failed: {e}") from e
     
     def _read_config(self):
         """Read config register."""
-        self.i2c.readfrom_mem_into(self.address, _REG_CONFIG, self._buf2)
+        try:
+            self.i2c.readfrom_mem_into(self.address, _REG_CONFIG, self._buf2)
+        except OSError as e:
+            raise RuntimeError(f"ADS1115 I2C read failed: {e}") from e
         return (self._buf2[0] << 8) | self._buf2[1]
     
     def _read_conversion(self):
         """Read conversion register as signed 16-bit."""
-        self.i2c.readfrom_mem_into(self.address, _REG_CONVERSION, self._buf2)
+        try:
+            self.i2c.readfrom_mem_into(self.address, _REG_CONVERSION, self._buf2)
+        except OSError as e:
+            raise RuntimeError(f"ADS1115 I2C read failed: {e}") from e
         value = (self._buf2[0] << 8) | self._buf2[1]
         if value >= 0x8000:
             value -= 0x10000
