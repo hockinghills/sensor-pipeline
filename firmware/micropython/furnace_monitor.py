@@ -39,7 +39,7 @@ from ads1115 import ADS1115
 
 def setup_wifi(ssid, password):
     """
-    Connect to WiFi.
+    Connect to WiFi with brownout prevention.
 
     Args:
         ssid: Network SSID
@@ -48,20 +48,27 @@ def setup_wifi(ssid, password):
     Returns:
         bool: True if connected
     """
-    print(f"\n--- Connecting to {ssid} ---")
+    print(f"\n--- Connecting to {ssid} (Anti-Brownout Mode) ---")
 
     wlan = network.WLAN(network.STA_IF)
+    wlan.active(False)
+    time.sleep(1)
     wlan.active(True)
 
-    if wlan.isconnected():
-        print("Already connected")
-        print(f"IP: {wlan.ifconfig()[0]}")
-        return True
+    # THE MAGIC FIX
+    # 8.5 dBm is plenty for a house.
+    try:
+        wlan.config(txpower=8.5)
+        actual_power = wlan.config("txpower")
+        print(f"TX Power capped at: {actual_power} dBm")
+    except Exception as e:
+        print(f"Power setting failed: {e}")
 
     try:
-        print("Connecting...")
+        print("Handshaking...")
         wlan.connect(ssid, password)
 
+        # Wait for connection
         timeout = 10
         while timeout > 0:
             if wlan.isconnected():
@@ -69,16 +76,32 @@ def setup_wifi(ssid, password):
             time.sleep(1)
             timeout -= 1
 
-        if wlan.isconnected():
-            print("SUCCESS!")
-            print(f"IP: {wlan.ifconfig()[0]}")
-            return True
-        else:
-            print("FAILURE: Timeout")
+        if not wlan.isconnected():
+            print("\nFAILURE: Connection timeout")
             return False
 
+        print("\nSUCCESS! Connected.")
+        ip_info = wlan.ifconfig()
+        print(f"IP Address: {ip_info[0]}")
+        print(f"Signal Strength: {wlan.status('rssi')} dBm")
+
+        # Test internet connectivity
+        print("Testing internet...")
+        try:
+            s = socket.socket()
+            s.settimeout(3.0)
+            start = time.ticks_ms()
+            s.connect(('8.8.8.8', 53))
+            s.close()
+            ping_time = time.ticks_diff(time.ticks_ms(), start)
+            print(f"Internet OK: {ping_time} ms to Google DNS")
+        except Exception as e:
+            print(f"Internet test failed: {e}")
+
+        return True
+
     except Exception as e:
-        print(f"FAILURE: {e}")
+        print(f"\nFAILURE: {e}")
         return False
 
 
@@ -110,6 +133,9 @@ class FurnaceMonitor:
     FLICKER_PEAK_NOMINAL = 10
     THERMOACOUSTIC_FREQ_MIN = 30
     THERMOACOUSTIC_FREQ_MAX = 400
+
+    # Signal validation
+    MIN_SIGNAL_RMS = 0.001  # Minimum RMS to consider valid signal (not noise)
 
     # Control signal parameters
     SENSE_RESISTANCE = 100.0
@@ -254,6 +280,12 @@ class FurnaceMonitor:
         # RMS amplitude
         rms = math.sqrt(sum(m**2 for m in magnitudes) / len(magnitudes))
         results['rms_amplitude'] = rms
+
+        # Check for minimum signal threshold (reject noise on floating inputs)
+        if rms < self.MIN_SIGNAL_RMS:
+            results['status'] = 'no_signal'
+            results['warnings'].append(f'Signal too weak (RMS={rms:.6f}) - no flame or sensor disconnected')
+            return results
 
         # Status determination
         flicker_freq = results['flicker_peak_freq']

@@ -6,8 +6,8 @@ Auto-runs on boot if copied to the ESP32.
 from furnace_monitor import FurnaceMonitor
 
 # Configuration
-WIFI_SSID = "YOUR_SSID"
-WIFI_PASSWORD = "YOUR_PASSWORD"
+WIFI_SSID = "holyshitHollar"
+WIFI_PASSWORD = "gotNewWifi93$"
 VECTOR_HOST = "192.168.50.224"  # Pi IP address
 VECTOR_PORT = 9000  # Vector UDP port
 
