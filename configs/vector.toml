@@ -19,6 +19,13 @@ host = "127.0.0.1"
 port = 1883
 topic = "furnace/data"
 
+# ESP32 Network Metrics via MQTT
+[sources.furnace_network_mqtt]
+type = "mqtt"
+host = "127.0.0.1"
+port = 1883
+topic = "furnace/network_metrics"
+
 # ESP32 Pressure Sensor via Serial (USB)
 [sources.pressure_serial]
 type = "exec"
@@ -46,6 +53,20 @@ if err != null {
 }
 . = parsed
 .measurement = "furnace"
+.host = "piiot"
+'''
+
+# Parse network metrics MQTT JSON data
+[transforms.parse_network]
+type = "remap"
+inputs = ["furnace_network_mqtt"]
+source = '''
+parsed, err = parse_json(.message)
+if err != null {
+  abort
+}
+. = parsed
+.measurement = "network"
 .host = "piiot"
 '''
 
@@ -107,8 +128,13 @@ if length(fields) == 0 {
   abort
 }
 
-# Nanosecond timestamp
-ts = to_unix_timestamp(now(), unit: "nanoseconds")
+# Use ESP32 timestamp (milliseconds) if available, otherwise use current time
+# ESP32 provides Unix timestamp in milliseconds, convert to nanoseconds
+ts = if exists(.timestamp) {
+  to_int!(.timestamp) * 1000000
+} else {
+  to_unix_timestamp(now(), unit: "nanoseconds")
+}
 
 .message = "furnace," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
@@ -159,6 +185,39 @@ ts = to_unix_timestamp(now(), unit: "nanoseconds")
 .message = "pressure," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
 
+# Format network metrics as ILP
+[transforms.network_to_ilp]
+type = "remap"
+inputs = ["parse_network"]
+source = '''
+fields = []
+tags = "host=" + (string(.host) ?? "unknown")
+
+# Network metrics from ESP32
+if exists(.wifi_rssi) { fields = push(fields, "wifi_rssi=" + to_string!(.wifi_rssi) + "i") }
+if exists(.connection_uptime_ms) { fields = push(fields, "connection_uptime_ms=" + to_string!(.connection_uptime_ms) + "i") }
+if exists(.mqtt_reconnects) { fields = push(fields, "mqtt_reconnects=" + to_string!(.mqtt_reconnects) + "i") }
+if exists(.wifi_reconnects) { fields = push(fields, "wifi_reconnects=" + to_string!(.wifi_reconnects) + "i") }
+if exists(.packets_sent) { fields = push(fields, "packets_sent=" + to_string!(.packets_sent) + "i") }
+if exists(.packets_lost) { fields = push(fields, "packets_lost=" + to_string!(.packets_lost) + "i") }
+if exists(.packet_loss_rate) { fields = push(fields, "packet_loss_rate=" + to_string!(.packet_loss_rate)) }
+if exists(.network_latency_ms) { fields = push(fields, "network_latency_ms=" + to_string!(.network_latency_ms) + "i") }
+if exists(.state_changes) { fields = push(fields, "state_changes=" + to_string!(.state_changes) + "i") }
+
+# Connection state as tag (categorical data)
+if exists(.connection_state) {
+  tags = tags + ",state=" + to_string!(.connection_state)
+}
+
+if length(fields) == 0 {
+  abort
+}
+
+ts = to_unix_timestamp(now(), unit: "nanoseconds")
+
+.message = "network," + tags + " " + join!(fields, ",") + " " + to_string(ts)
+'''
+
 # =============================================================================
 # SINKS
 # =============================================================================
@@ -166,7 +225,7 @@ ts = to_unix_timestamp(now(), unit: "nanoseconds")
 # VictoriaMetrics output via InfluxDB Line Protocol (HTTP)
 [sinks.victoriametrics]
 type = "http"
-inputs = ["furnace_to_ilp", "bme680_to_ilp", "pressure_to_ilp"]
+inputs = ["furnace_to_ilp", "bme680_to_ilp", "pressure_to_ilp", "network_to_ilp"]
 uri = "http://127.0.0.1:8428/write"
 method = "post"
 
