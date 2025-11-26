@@ -165,45 +165,82 @@ class FurnaceMonitor:
         self.wifi_connected = False
         self.udp_sock = None
 
-    def init(self):
-        """Initialize all hardware."""
+    def init(self, max_retries=3):
+        """
+        Initialize all hardware with retry logic.
+
+        Args:
+            max_retries: Maximum initialization attempts per component
+        """
         print("\n=== Furnace Monitor Initialization ===")
 
-        # WiFi setup
+        # WiFi setup with retry
         if self.ssid and self.password:
-            self.wifi_connected = setup_wifi(self.ssid, self.password)
+            for attempt in range(max_retries):
+                try:
+                    self.wifi_connected = setup_wifi(self.ssid, self.password)
+                    if self.wifi_connected:
+                        break
+                except Exception as e:
+                    print(f"WiFi setup attempt {attempt + 1}/{max_retries} failed: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)  # Exponential backoff
         else:
             print("No WiFi credentials provided, skipping WiFi setup")
 
         print("\n--- Hardware Setup ---")
 
-        # Initialize flame sensor I2C and ADC
+        # Initialize flame sensor I2C and ADC with retry
         print(f"Flame sensor (0x{self.FLAME_ADDR:02X} on GPIO {self.FLAME_SDA}/{self.FLAME_SCL})...")
-        self.flame_i2c = I2C(self.FLAME_I2C_BUS,
-                            scl=Pin(self.FLAME_SCL),
-                            sda=Pin(self.FLAME_SDA),
-                            freq=400000)
-
-        self.flame_adc = ADS1115(self.flame_i2c, address=self.FLAME_ADDR)
-        self.flame_adc.init(gain=ADS1115.GAIN_4096, rate=ADS1115.RATE_860)
-
-        # Initialize control signal I2C and ADC
-        print(f"Control signal (0x{self.CONTROL_ADDR:02X} on GPIO {self.CONTROL_SDA}/{self.CONTROL_SCL})...")
-        self.control_i2c = I2C(self.CONTROL_I2C_BUS,
-                              scl=Pin(self.CONTROL_SCL),
-                              sda=Pin(self.CONTROL_SDA),
-                              freq=400000)
-
-        self.control_adc = ADS1115(self.control_i2c, address=self.CONTROL_ADDR)
-        self.control_adc.init(gain=ADS1115.GAIN_2048, rate=ADS1115.RATE_128)
-
-        # Setup UDP socket for data transmission
-        if self.wifi_connected and self.vector_host:
+        for attempt in range(max_retries):
             try:
-                self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                print(f"UDP output enabled: {self.vector_host}:{self.vector_port}")
+                self.flame_i2c = I2C(self.FLAME_I2C_BUS,
+                                    scl=Pin(self.FLAME_SCL),
+                                    sda=Pin(self.FLAME_SDA),
+                                    freq=400000)
+
+                self.flame_adc = ADS1115(self.flame_i2c, address=self.FLAME_ADDR)
+                self.flame_adc.init(gain=ADS1115.GAIN_4096, rate=ADS1115.RATE_860)
+                print("  Flame sensor initialized")
+                break
             except Exception as e:
-                print(f"UDP socket creation failed: {e}")
+                print(f"  Attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    raise RuntimeError(f"Failed to initialize flame sensor after {max_retries} attempts") from e
+
+        # Initialize control signal I2C and ADC with retry
+        print(f"Control signal (0x{self.CONTROL_ADDR:02X} on GPIO {self.CONTROL_SDA}/{self.CONTROL_SCL})...")
+        for attempt in range(max_retries):
+            try:
+                self.control_i2c = I2C(self.CONTROL_I2C_BUS,
+                                      scl=Pin(self.CONTROL_SCL),
+                                      sda=Pin(self.CONTROL_SDA),
+                                      freq=400000)
+
+                self.control_adc = ADS1115(self.control_i2c, address=self.CONTROL_ADDR)
+                self.control_adc.init(gain=ADS1115.GAIN_2048, rate=ADS1115.RATE_128)
+                print("  Control signal initialized")
+                break
+            except Exception as e:
+                print(f"  Attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    raise RuntimeError(f"Failed to initialize control signal after {max_retries} attempts") from e
+
+        # Setup UDP socket for data transmission with retry
+        if self.wifi_connected and self.vector_host:
+            for attempt in range(max_retries):
+                try:
+                    self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    print(f"UDP output enabled: {self.vector_host}:{self.vector_port}")
+                    break
+                except Exception as e:
+                    print(f"UDP socket attempt {attempt + 1}/{max_retries} failed: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
 
         print("\n=== Initialization Complete ===\n")
 
@@ -368,35 +405,79 @@ class FurnaceMonitor:
         except Exception as e:
             print(f"UDP send failed: {e}")
 
-    def monitor(self, duration_sec=60, interval_sec=1):
+    def monitor(self, duration_sec=60, interval_sec=1, watchdog=None):
         """
         Continuous monitoring of both systems.
 
         Args:
             duration_sec: Total monitoring duration
             interval_sec: Time between readings
+            watchdog: Optional WDT object to feed during monitoring
         """
         print(f"\n=== Monitoring for {duration_sec} seconds ===")
         print("-" * 80)
 
         start_time = time.time()
+        error_count = 0
+        consecutive_errors = 0
 
         try:
             while (time.time() - start_time) < duration_sec:
                 timestamp = time.time()
                 elapsed = timestamp - start_time
 
-                # Read control signal
-                ctrl_voltage, ctrl_percent, ctrl_ma = self.read_control_signal()
+                # Feed watchdog at start of each loop iteration
+                if watchdog:
+                    try:
+                        watchdog.feed()
+                    except Exception as e:
+                        print(f"! Watchdog feed failed: {e}")
 
-                # Read flame spectrum
-                freqs, mags = self.read_flame_spectrum(samples=512)
-                flame_analysis = self.analyze_flame(freqs, mags)
+                # Initialize default values in case of errors
+                ctrl_voltage, ctrl_percent, ctrl_ma = 0.0, 0.0, 0.0
+                flame_analysis = {
+                    'status': 'error',
+                    'flicker_peak_freq': 0,
+                    'thermoacoustic_peak_freq': 0,
+                    'warnings': []
+                }
 
-                # Send data via UDP
-                self.send_data(timestamp, flame_analysis, ctrl_voltage, ctrl_percent, ctrl_ma)
+                loop_success = True
 
-                # Display
+                # Read control signal with error handling
+                try:
+                    ctrl_voltage, ctrl_percent, ctrl_ma = self.read_control_signal()
+                except Exception as e:
+                    print(f"! Control signal read failed: {e}")
+                    error_count += 1
+                    loop_success = False
+
+                # Read flame spectrum with error handling
+                try:
+                    freqs, mags = self.read_flame_spectrum(samples=512)
+                    flame_analysis = self.analyze_flame(freqs, mags)
+                except Exception as e:
+                    print(f"! Flame sensor read failed: {e}")
+                    error_count += 1
+                    loop_success = False
+
+                # Send data via UDP with error handling
+                try:
+                    self.send_data(timestamp, flame_analysis, ctrl_voltage, ctrl_percent, ctrl_ma)
+                except Exception as e:
+                    print(f"! UDP send failed: {e}")
+                    error_count += 1
+                    loop_success = False
+
+                # Track consecutive errors
+                if loop_success:
+                    consecutive_errors = 0
+                else:
+                    consecutive_errors += 1
+                    if consecutive_errors >= 10:
+                        print(f"! WARNING: {consecutive_errors} consecutive errors - possible hardware failure")
+
+                # Display results
                 status = flame_analysis['status'].upper()
                 flicker = flame_analysis['flicker_peak_freq']
                 thermo = flame_analysis['thermoacoustic_peak_freq']
@@ -418,7 +499,7 @@ class FurnaceMonitor:
             print("\nMonitoring stopped")
 
         print("-" * 80)
-        print("=== Monitoring Complete ===\n")
+        print(f"=== Monitoring Complete (total errors: {error_count}) ===\n")
 
     def _fft(self, x):
         """Cooley-Tukey FFT."""

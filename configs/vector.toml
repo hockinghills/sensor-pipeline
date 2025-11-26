@@ -232,7 +232,7 @@ if length(fields) == 0 {
 # Use timestamp from ESP32 if available, otherwise now
 ts = to_unix_timestamp(now(), unit: "nanoseconds")
 if exists(.timestamp) {
-  ts = to_int!(.timestamp) * 1000000000
+  ts = to_int!(to_float!(.timestamp) * 1000000000.0)
 }
 
 .message = "flame_dynamics," + tags + " " + join!(fields, ",") + " " + to_string(ts)

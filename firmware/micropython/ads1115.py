@@ -304,52 +304,76 @@ class ADS1115:
     def capture(self, samples, channel=0):
         """
         Capture multiple samples using continuous mode.
-        
+
         Optimized for high-speed acquisition (FFT, etc.)
-        
+
         Args:
             samples: Number of samples to capture
             channel: Single-ended channel (0-3)
-        
+
         Returns:
             list: Voltage values
+
+        Raises:
+            RuntimeError: If too many consecutive I2C errors occur
         """
         # Set up continuous mode
         mux = (_MUX_SINGLE_0 + (channel << 12))
-        config = (mux | self._gain | _MODE_CONTINUOUS | 
+        config = (mux | self._gain | _MODE_CONTINUOUS |
                   self._rate | _COMP_DISABLE)
-        
-        self._write_config(config)
-        
-        # Wait for first conversion
-        conv_time_us = (1000000 // self._get_rate_sps()) + 100
+
+        try:
+            self._write_config(config)
+        except OSError as e:
+            raise RuntimeError(f"ADS1115 config write failed: {e}") from e
+
+        # Calculate delay based on actual sample rate
+        rate_sps = self._get_rate_sps()
+        conv_time_us = (1000000 // rate_sps) + 100
         time.sleep_us(conv_time_us)
-        
+
         # Capture samples
         fsr = self._FSR_MAP[self._gain]
         scale = fsr / 32768.0
         results = [0.0] * samples
-        
+
         buf = self._buf2
         i2c = self.i2c
         addr = self.address
-        
+
+        consecutive_errors = 0
+        last_good_value = 0.0
+
         for i in range(samples):
-            i2c.readfrom_mem_into(addr, _REG_CONVERSION, buf)
-            value = (buf[0] << 8) | buf[1]
-            if value >= 0x8000:
-                value -= 0x10000
-            results[i] = value * scale
-            
+            try:
+                i2c.readfrom_mem_into(addr, _REG_CONVERSION, buf)
+                value = (buf[0] << 8) | buf[1]
+                if value >= 0x8000:
+                    value -= 0x10000
+                results[i] = value * scale
+                last_good_value = results[i]
+                consecutive_errors = 0
+
+            except OSError as e:
+                # I2C error - use last good value and track errors
+                results[i] = last_good_value
+                consecutive_errors += 1
+
+                if consecutive_errors >= 10:
+                    raise RuntimeError(f"ADS1115 I2C failed after {consecutive_errors} consecutive errors: {e}") from e
+
             # Pace reads to match conversion rate
-            # At 860 SPS, each conversion takes ~1.16ms
-            time.sleep_us(1000)
-        
+            time.sleep_us(1000000 // rate_sps)
+
         # Return to single-shot mode (lower power)
-        config = (mux | self._gain | _MODE_SINGLE | 
+        config = (mux | self._gain | _MODE_SINGLE |
                   self._rate | _COMP_DISABLE)
-        self._write_config(config)
-        
+        try:
+            self._write_config(config)
+        except OSError as e:
+            # Non-fatal - just log it
+            print(f"Warning: Failed to return to single-shot mode: {e}")
+
         return results
 
 
