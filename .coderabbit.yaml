@@ -56,11 +56,18 @@ reviews:
         
         ### CRITICAL: Check for these bugs
         
-        **SPI Communication (MAX31856):**
+        **SPI Communication (MAX31856 - main furnace thermocouple):**
         - SPI mode MUST be 1 or 3 (CPHA=1 required)
         - Data must be stable BEFORE clock edge, not after
         - CS timing: 100ns setup, 100ns hold, 400ns between transactions
         - Bit 7 of address byte: 0=read, 1=write
+
+        **SPI Communication (MAX6675 - recuperator thermocouples):**
+        - SPI mode MUST be 0 (CPOL=0, CPHA=0) - different from MAX31856!
+        - Read-only device, 16-bit data: 1 dummy + 12 temp + 1 open + 1 device + 1 state
+        - Bit 2 = thermocouple open detection (1 = disconnected)
+        - Hardware validates data integrity - software range checks not needed
+        - 220ms minimum between conversions (chip limitation)
         
         **I2C Communication (ADS1115):**
         - Default address is 0x48 (7-bit), not 0x90
@@ -114,15 +121,30 @@ reviews:
         - Buffer data locally when network is unavailable
         
         ### Reliability Concerns
-        
+
         **Check for:**
         - Blocking operations that could freeze monitoring
         - Missing watchdog feeds in long operations
         - Race conditions in interrupt handlers
         - Shared state modified without protection
         - Resources not released on error paths
-        
+
         **This system monitors a 2300°F furnace 24/7. Lockups are not acceptable.**
+
+        ### Custom Hardware Drivers
+
+        This project uses **custom MicroPython drivers**, not standard library drivers.
+        Do NOT assume standard API patterns from Adafruit, robert-hh, or other common libraries.
+
+        **Custom drivers in this project:**
+        - `ads1115.py` - Custom ADS1115 ADC driver with `read_voltage(channel=N)` method
+        - `max6675.py` - Custom MAX6675 thermocouple driver with `read_safe()` method
+        - `max31856.py` - Custom MAX31856 thermocouple driver
+
+        **When reviewing code that uses these drivers:**
+        - Check the actual driver implementation in `firmware/micropython/` for API details
+        - Do not suggest changes based on external library assumptions
+        - Review the driver code itself for correctness and reliability
 
     #---------------------------------------------------------------------------
     # ARDUINO/C++ FIRMWARE (ESP32 DevKitC-VE)

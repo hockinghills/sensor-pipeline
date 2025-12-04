@@ -19,12 +19,6 @@ host = "127.0.0.1"
 port = 1883
 topic = "furnace/data"
 
-# ESP32 Pressure Sensor via Serial (USB)
-[sources.pressure_serial]
-type = "exec"
-command = ["cat", "/dev/ttyACM0"]
-mode = "streaming"
-
 # BME680 Environmental Sensor - 10Hz streaming
 [sources.bme680]
 type = "exec"
@@ -53,19 +47,6 @@ if err != null {
 . = parsed
 .measurement = "furnace"
 .host = "piiot"
-'''
-
-# Parse pressure sensor JSON from ESP32 serial
-[transforms.parse_pressure]
-type = "remap"
-inputs = ["pressure_serial"]
-source = '''
-# Try to parse JSON, skip non-JSON lines
-parsed, err = parse_json(.message)
-if err != null {
-  abort
-}
-. = parsed
 '''
 
 # Parse BME680 JSON readings
@@ -116,6 +97,13 @@ if exists(.control) {
   .control_percent = .control.percent
   .control_ma = .control.milliamps
   del(.control)
+}
+
+# Extract nested pressure data
+if exists(.pressure) {
+  .pressure1_psi = .pressure.sensor1_psi
+  .pressure2_psi = .pressure.sensor2_psi
+  del(.pressure)
 }
 
 .measurement = "flame_dynamics"
@@ -175,31 +163,6 @@ ts = to_unix_timestamp(now(), unit: "nanoseconds")
 .message = "environment," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
 
-# Format pressure sensor data as ILP
-[transforms.pressure_to_ilp]
-type = "remap"
-inputs = ["parse_pressure"]
-source = '''
-fields = []
-tags = "host=piiot"
-
-# Pressure sensor fields from ESP32-S3 serial
-if exists(.pressure_inlet) { fields = push(fields, "pressure_inlet=" + to_string!(.pressure_inlet)) }
-if exists(.pressure_outlet) { fields = push(fields, "pressure_outlet=" + to_string!(.pressure_outlet)) }
-# Debug fields for calibration
-if exists(.inlet_v) { fields = push(fields, "inlet_v=" + to_string!(.inlet_v)) }
-if exists(.ref_v) { fields = push(fields, "ref_v=" + to_string!(.ref_v)) }
-if exists(.inlet_raw) { fields = push(fields, "inlet_raw=" + to_string!(.inlet_raw) + "i") }
-
-if length(fields) == 0 {
-  abort
-}
-
-ts = to_unix_timestamp(now(), unit: "nanoseconds")
-
-.message = "pressure," + tags + " " + join!(fields, ",") + " " + to_string(ts)
-'''
-
 # Format flame dynamics UDP data as ILP
 [transforms.flame_udp_to_ilp]
 type = "remap"
@@ -220,20 +183,36 @@ if exists(.control_voltage) { fields = push(fields, "control_voltage=" + to_stri
 if exists(.control_percent) { fields = push(fields, "control_percent=" + to_string!(.control_percent)) }
 if exists(.control_ma) { fields = push(fields, "control_ma=" + to_string!(.control_ma)) }
 
+# Pressure sensor fields (validate type - firmware sends null for faulted sensors)
+# Track validity for monitoring - null/invalid indicates sensor fault or wiring issue
+if exists(.pressure1_psi) {
+  if is_float(.pressure1_psi) {
+    fields = push(fields, "pressure1_psi=" + to_string!(.pressure1_psi))
+    fields = push(fields, "pressure1_valid=1")
+  } else {
+    fields = push(fields, "pressure1_valid=0")
+  }
+}
+if exists(.pressure2_psi) {
+  if is_float(.pressure2_psi) {
+    fields = push(fields, "pressure2_psi=" + to_string!(.pressure2_psi))
+    fields = push(fields, "pressure2_valid=1")
+  } else {
+    fields = push(fields, "pressure2_valid=0")
+  }
+}
+
 # Add flame status as a tag
 if exists(.flame_status) {
-  tags = tags + ",status=" + to_string(.flame_status)
+  tags = tags + ",status=" + to_string!(.flame_status)
 }
 
 if length(fields) == 0 {
   abort
 }
 
-# Use timestamp from ESP32 if available, otherwise now
+# Use current time for immediate UDP data (not batched)
 ts = to_unix_timestamp(now(), unit: "nanoseconds")
-if exists(.timestamp) {
-  ts = to_int!(to_float!(.timestamp) * 1000000000.0)
-}
 
 .message = "flame_dynamics," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
@@ -245,7 +224,7 @@ if exists(.timestamp) {
 # VictoriaMetrics output via InfluxDB Line Protocol (HTTP)
 [sinks.victoriametrics]
 type = "http"
-inputs = ["furnace_to_ilp", "bme680_to_ilp", "pressure_to_ilp", "flame_udp_to_ilp"]
+inputs = ["furnace_to_ilp", "bme680_to_ilp", "flame_udp_to_ilp"]
 uri = "http://127.0.0.1:8428/write"
 method = "post"
 

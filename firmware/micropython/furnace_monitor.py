@@ -33,8 +33,9 @@ import math
 import network
 import socket
 import json
-from machine import Pin, I2C
+from machine import Pin, I2C, SPI
 from ads1115 import ADS1115
+from max6675 import MAX6675
 
 
 def setup_wifi(ssid, password):
@@ -66,18 +67,46 @@ def setup_wifi(ssid, password):
 
     try:
         print("Handshaking...")
+
+        # Disconnect first if already trying to connect
+        if wlan.status() != network.STAT_IDLE:
+            wlan.disconnect()
+            time.sleep(0.5)
+
         wlan.connect(ssid, password)
 
-        # Wait for connection
-        timeout = 10
-        while timeout > 0:
+        # Wait for connection with proper timeout
+        timeout_sec = 15
+        start_time = time.time()
+        while True:
+            status = wlan.status()
+
+            # Check if connected
             if wlan.isconnected():
                 break
+
+            # Check for connection failure states
+            if status == network.STAT_WRONG_PASSWORD:
+                print("\nFAILURE: Wrong password")
+                return False
+            elif status == network.STAT_NO_AP_FOUND:
+                print("\nFAILURE: Network not found")
+                return False
+            # STAT_CONNECT_FAIL doesn't exist in MicroPython v1.24.1
+            # Timeout logic below will catch connection failures
+
+            # Check for actual timeout
+            elapsed = time.time() - start_time
+            if elapsed > timeout_sec:
+                print("\nFAILURE: Connection timeout")
+                wlan.disconnect()
+                return False
+
             time.sleep(1)
-            timeout -= 1
 
         if not wlan.isconnected():
             print("\nFAILURE: Connection timeout")
+            wlan.disconnect()
             return False
 
         print("\nSUCCESS! Connected.")
@@ -121,7 +150,7 @@ class FurnaceMonitor:
     FLAME_SDA = 17
     FLAME_SCL = 18
     FLAME_ADDR = 0x48
-    FLAME_CHANNEL = 0
+    FLAME_CHANNEL = 3
 
     CONTROL_I2C_BUS = 1
     CONTROL_SDA = 41
@@ -144,6 +173,21 @@ class FurnaceMonitor:
     MA_MIN = 4.0
     MA_MAX = 20.0
 
+    # Pressure sensor parameters (0.5-4.5V → 0-5 PSI)
+    PRESSURE_V_MIN = 0.5
+    PRESSURE_V_MAX = 4.5
+    PRESSURE_PSI_MAX = 5.0
+    PRESSURE_FLAME_CHANNEL = 1   # Ch1 on ADS1115 #1 (flame board)
+    PRESSURE_CONTROL_CHANNEL = 3  # Ch3 on ADS1115 #2 (control board)
+
+    # Recuperator thermocouple pins (MAX6675 via SPI)
+    RECUP_SPI_ID = 1
+    RECUP_SCK = 12
+    RECUP_MISO = 13
+    RECUP_MOSI = 11  # Not used by MAX6675 but required for SPI init
+    RECUP_CS_BOTTOM = 14  # Preheated air going to burner
+    RECUP_CS_TOP = 15     # Exhaust after heat transfer
+
     def __init__(self, ssid=None, password=None, vector_host=None, vector_port=9000):
         """
         Initialize furnace monitor.
@@ -163,6 +207,11 @@ class FurnaceMonitor:
         self.flame_adc = None
         self.control_i2c = None
         self.control_adc = None
+
+        # Recuperator thermocouples (SPI)
+        self.recup_spi = None
+        self.recup_bottom = None  # Preheated air temp
+        self.recup_top = None     # Exhaust temp
 
         self.wifi_connected = False
         self.udp_sock = None
@@ -243,6 +292,45 @@ class FurnaceMonitor:
                 else:
                     raise RuntimeError(f"Failed to initialize control signal after {max_retries} attempts") from e
 
+        # Initialize recuperator thermocouples (SPI + MAX6675)
+        print(f"Recuperator sensors (SPI on GPIO {self.RECUP_SCK}/{self.RECUP_MISO})...")
+        for attempt in range(max_retries):
+            try:
+                self.recup_spi = SPI(self.RECUP_SPI_ID,
+                                     baudrate=1000000,
+                                     polarity=0,
+                                     phase=0,  # MAX6675 uses SPI mode 0
+                                     sck=Pin(self.RECUP_SCK),
+                                     mosi=Pin(self.RECUP_MOSI),
+                                     miso=Pin(self.RECUP_MISO))
+
+                self.recup_bottom = MAX6675(self.recup_spi, self.RECUP_CS_BOTTOM)
+                self.recup_top = MAX6675(self.recup_spi, self.RECUP_CS_TOP)
+
+                # Test read to verify sensors
+                # MAX6675 requires 220ms minimum between conversions
+                _, bottom_f, bottom_ok = self.recup_bottom.read_safe()
+                time.sleep_ms(250)
+                _, top_f, top_ok = self.recup_top.read_safe()
+
+                print(f"  Bottom (preheated air): {'OK' if bottom_ok else 'DISCONNECTED'} - {bottom_f:.1f}°F")
+                print(f"  Top (exhaust): {'OK' if top_ok else 'DISCONNECTED'} - {top_f:.1f}°F")
+                break
+            except Exception as e:
+                print(f"  Attempt {attempt + 1}/{max_retries} failed: {e}")
+                # Clean up SPI before retry
+                if self.recup_spi:
+                    try:
+                        self.recup_spi.deinit()
+                    except Exception:
+                        pass
+                    self.recup_spi = None
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    print("  WARNING: Recuperator sensors failed to initialize, continuing without")
+                    # Don't raise - recuperator is non-critical, continue with other sensors
+
         # Setup UDP socket for data transmission with retry
         if self.wifi_connected and self.vector_host:
             for attempt in range(max_retries):
@@ -290,6 +378,17 @@ class FurnaceMonitor:
                 print(f"  Control I2C deinit failed: {e}")
             self.control_i2c = None
             self.control_adc = None
+
+        # Deinit SPI bus
+        if self.recup_spi:
+            try:
+                self.recup_spi.deinit()
+                print("  Recuperator SPI deinitialized")
+            except Exception as e:
+                print(f"  Recuperator SPI deinit failed: {e}")
+            self.recup_spi = None
+            self.recup_bottom = None
+            self.recup_top = None
 
         # Disconnect WiFi
         if self.wifi_connected:
@@ -432,7 +531,69 @@ class FurnaceMonitor:
 
         return voltage, percent, ma
 
-    def send_data(self, timestamp, flame_analysis, ctrl_voltage, ctrl_percent, ctrl_ma):
+    def read_pressure_sensors(self):
+        """
+        Read both pressure sensors (voltage output type: 0.5-4.5V = 0-5 PSI).
+
+        Returns:
+            tuple: (pressure1_psi, pressure2_psi)
+                - pressure1: From ADS1115 #1 Ch1 (flame board)
+                - pressure2: From ADS1115 #2 Ch3 (control board)
+                - Returns None for a sensor if voltage indicates fault
+        """
+        # Fault detection thresholds (0.1V margin from 0.5-4.5V spec)
+        FAULT_V_LOW = 0.4   # Below this = open/disconnected
+        FAULT_V_HIGH = 4.6  # Above this = shorted/overvoltage
+
+        voltage_range = self.PRESSURE_V_MAX - self.PRESSURE_V_MIN
+
+        # Read and validate pressure sensor on flame board
+        voltage1 = self.flame_adc.read_voltage(channel=self.PRESSURE_FLAME_CHANNEL)
+        if voltage1 < FAULT_V_LOW or voltage1 > FAULT_V_HIGH:
+            print(f"Pressure sensor 1 fault: {voltage1:.2f}V")
+            psi1 = None
+        else:
+            psi1 = ((voltage1 - self.PRESSURE_V_MIN) / voltage_range) * self.PRESSURE_PSI_MAX
+            psi1 = max(0.0, min(self.PRESSURE_PSI_MAX, psi1))
+
+        # Read and validate pressure sensor on control board
+        voltage2 = self.control_adc.read_voltage(channel=self.PRESSURE_CONTROL_CHANNEL)
+        if voltage2 < FAULT_V_LOW or voltage2 > FAULT_V_HIGH:
+            print(f"Pressure sensor 2 fault: {voltage2:.2f}V")
+            psi2 = None
+        else:
+            psi2 = ((voltage2 - self.PRESSURE_V_MIN) / voltage_range) * self.PRESSURE_PSI_MAX
+            psi2 = max(0.0, min(self.PRESSURE_PSI_MAX, psi2))
+
+        return psi1, psi2
+
+    def read_recuperator_temps(self):
+        """
+        Read recuperator thermocouple temperatures.
+
+        Returns:
+            tuple: (bottom_f, top_f, bottom_ok, top_ok)
+                - bottom_f: Preheated air temp in °F (going to burner)
+                - top_f: Exhaust temp in °F (after heat transfer)
+                - bottom_ok: True if bottom thermocouple connected
+                - top_ok: True if top thermocouple connected
+        """
+        bottom_f, top_f = 0.0, 0.0
+        bottom_ok, top_ok = False, False
+
+        if self.recup_bottom:
+            _, bottom_f, bottom_ok = self.recup_bottom.read_safe()
+
+        # No delay needed - each MAX6675 instance tracks its own conversion timing
+        if self.recup_top:
+            _, top_f, top_ok = self.recup_top.read_safe()
+
+        return bottom_f, top_f, bottom_ok, top_ok
+
+    def send_data(self, timestamp, flame_analysis, ctrl_voltage, ctrl_percent, ctrl_ma,
+                  pressure1_psi=None, pressure2_psi=None,
+                  recup_bottom_f=0.0, recup_top_f=0.0, *,
+                  recup_bottom_ok=False, recup_top_ok=False):
         """
         Send data via UDP to Vector (non-blocking).
 
@@ -442,6 +603,12 @@ class FurnaceMonitor:
             ctrl_voltage: Control signal voltage
             ctrl_percent: Control signal percent
             ctrl_ma: Control signal milliamps
+            pressure1_psi: Pressure sensor 1 reading in PSI
+            pressure2_psi: Pressure sensor 2 reading in PSI
+            recup_bottom_f: Recuperator preheated air temp (°F)
+            recup_top_f: Recuperator exhaust temp (°F)
+            recup_bottom_ok: True if bottom thermocouple connected
+            recup_top_ok: True if top thermocouple connected
         """
         if not self.udp_sock:
             return
@@ -468,6 +635,15 @@ class FurnaceMonitor:
                     "voltage": ctrl_voltage,
                     "percent": ctrl_percent,
                     "milliamps": ctrl_ma
+                },
+                "pressure": {
+                    "sensor1_psi": pressure1_psi,
+                    "sensor2_psi": pressure2_psi
+                },
+                "recuperator": {
+                    "bottom_f": recup_bottom_f if recup_bottom_ok else None,
+                    "top_f": recup_top_f if recup_top_ok else None,
+                    "delta_f": (recup_top_f - recup_bottom_f) if (recup_bottom_ok and recup_top_ok) else None
                 }
             }
 
@@ -485,11 +661,14 @@ class FurnaceMonitor:
         Continuous monitoring of both systems.
 
         Args:
-            duration_sec: Total monitoring duration
+            duration_sec: Total monitoring duration (None = run forever for 24/7 operation)
             interval_sec: Time between readings
             watchdog: Optional WDT object to feed during monitoring
         """
-        print(f"\n=== Monitoring for {duration_sec} seconds ===")
+        if duration_sec is None:
+            print("\n=== Starting 24/7 continuous monitoring ===")
+        else:
+            print(f"\n=== Monitoring for {duration_sec} seconds ===")
         print("-" * 80)
 
         start_time = time.time()
@@ -497,7 +676,7 @@ class FurnaceMonitor:
         consecutive_errors = 0
 
         try:
-            while (time.time() - start_time) < duration_sec:
+            while duration_sec is None or (time.time() - start_time) < duration_sec:
                 timestamp = time.time()
                 elapsed = timestamp - start_time
 
@@ -521,6 +700,9 @@ class FurnaceMonitor:
 
                 # Initialize default values in case of errors
                 ctrl_voltage, ctrl_percent, ctrl_ma = 0.0, 0.0, 0.0
+                pressure1_psi, pressure2_psi = 0.0, 0.0
+                recup_bottom_f, recup_top_f = 0.0, 0.0
+                recup_bottom_ok, recup_top_ok = False, False
                 flame_analysis = {
                     'status': 'error',
                     'flicker_peak_freq': 0,
@@ -541,6 +723,21 @@ class FurnaceMonitor:
                     error_count += 1
                     loop_success = False
 
+                # Read pressure sensors - non-critical, don't increment error count
+                try:
+                    pressure1_psi, pressure2_psi = self.read_pressure_sensors()
+                    # Keep None for faulted sensors - Vector expects null
+                except Exception as e:
+                    print(f"! Pressure sensors read failed: {e}")
+                    pressure1_psi, pressure2_psi = None, None
+
+                # Read recuperator temps with error handling
+                try:
+                    recup_bottom_f, recup_top_f, recup_bottom_ok, recup_top_ok = self.read_recuperator_temps()
+                except Exception as e:
+                    print(f"! Recuperator read failed: {e}")
+                    # Don't increment error_count - recuperator is non-critical
+
                 # Read flame spectrum with error handling
                 try:
                     freqs, mags = self.read_flame_spectrum(samples=512)
@@ -552,7 +749,9 @@ class FurnaceMonitor:
 
                 # Send data via UDP with error handling
                 try:
-                    self.send_data(timestamp, flame_analysis, ctrl_voltage, ctrl_percent, ctrl_ma)
+                    self.send_data(timestamp, flame_analysis, ctrl_voltage, ctrl_percent, ctrl_ma,
+                                   pressure1_psi, pressure2_psi, recup_bottom_f, recup_top_f,
+                                   recup_bottom_ok=recup_bottom_ok, recup_top_ok=recup_top_ok)
                 except Exception as e:
                     print(f"! UDP send failed: {e}")
                     error_count += 1
@@ -580,10 +779,20 @@ class FurnaceMonitor:
 
                 indicator = '+' if flame_analysis['status'] == 'normal' else '!'
 
-                print(f"[{elapsed:6.1f}s] {indicator} {status:10s} | "
-                      f"Flicker: {flicker:5.1f}Hz | "
-                      f"Thermo: {thermo:5.1f}Hz | "
-                      f"Demand: {ctrl_percent:5.1f}% ({ctrl_ma:.2f}mA)")
+                # Recuperator status indicators
+                bottom_status = f"{recup_bottom_f:.0f}" if recup_bottom_ok else "---"
+                top_status = f"{recup_top_f:.0f}" if recup_top_ok else "---"
+                # Only show delta when both sensors are connected
+                if recup_bottom_ok and recup_top_ok:
+                    delta_status = f"Δ{recup_top_f - recup_bottom_f:.0f}"
+                else:
+                    delta_status = "Δ---"
+
+                print(f"[{elapsed:6.1f}s] {indicator} {status:10s} "
+                      f"Flicker: {flicker:5.1f}Hz "
+                      f"Thermo: {thermo:5.1f}Hz "
+                      f"Demand: {ctrl_percent:5.1f}% "
+                      f"Recup: {bottom_status}/{top_status}°F ({delta_status})")
 
                 # Warnings
                 for warning in flame_analysis['warnings']:
@@ -671,12 +880,26 @@ def quick_test():
     v, p, ma = fm.read_control_signal()
     print(f"  {v:.3f}V = {ma:.2f}mA = {p:.1f}%")
 
+    print("\nTesting pressure sensors...")
+    p1, p2 = fm.read_pressure_sensors()
+    print(f"  Sensor 1: {p1:.2f} PSI" if p1 is not None else "  Sensor 1: FAULT")
+    print(f"  Sensor 2: {p2:.2f} PSI" if p2 is not None else "  Sensor 2: FAULT")
+
     print("\nTesting flame sensor...")
     freqs, mags = fm.read_flame_spectrum(samples=512)
     analysis = fm.analyze_flame(freqs, mags)
     print(f"  Status: {analysis['status']}")
     print(f"  Flicker: {analysis['flicker_peak_freq']:.1f} Hz")
     print(f"  Thermoacoustic: {analysis['thermoacoustic_peak_freq']:.1f} Hz")
+
+    print("\nTesting recuperator thermocouples...")
+    bottom_f, top_f, bottom_ok, top_ok = fm.read_recuperator_temps()
+    print(f"  Bottom (preheated air): {bottom_f:.1f}°F {'OK' if bottom_ok else 'DISCONNECTED'}")
+    print(f"  Top (exhaust): {top_f:.1f}°F {'OK' if top_ok else 'DISCONNECTED'}")
+    if bottom_ok and top_ok:
+        print(f"  Delta: {top_f - bottom_f:.1f}°F")
+    else:
+        print("  Delta: ---°F (sensor disconnected)")
 
     print("\n=== Test Complete ===")
 

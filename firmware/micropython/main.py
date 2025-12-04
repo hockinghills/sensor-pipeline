@@ -6,6 +6,7 @@ Includes watchdog timer and automatic crash recovery for 24/7 operation.
 """
 
 import time
+import gc
 from machine import WDT
 from furnace_monitor import FurnaceMonitor
 
@@ -25,8 +26,13 @@ except ImportError:
 WDT_TIMEOUT_MS = 30000  # 30 seconds
 
 
-def run_monitor():
-    """Run monitor with exception recovery."""
+def run_monitor(rtc=None):
+    """Run monitor with exception recovery.
+
+    Args:
+        rtc: Optional RTC object for boot counter management.
+             If provided, boot counter is reset after successful sensor init.
+    """
     # Enable watchdog timer
     wdt = WDT(timeout=WDT_TIMEOUT_MS)
     print(f"Watchdog enabled: {WDT_TIMEOUT_MS // 1000} second timeout")
@@ -35,6 +41,7 @@ def run_monitor():
     restart_count = 0
 
     while True:
+        gc.collect()  # Explicit GC before each monitoring cycle
         fm = None
         try:
             print(f"\n=== Starting furnace monitor (restart #{restart_count}) ===")
@@ -50,8 +57,17 @@ def run_monitor():
             fm.init()
             wdt.feed()
 
-            # Run monitoring with watchdog feeding
-            fm.monitor(duration_sec=86400, interval_sec=1, watchdog=wdt)
+            # Reset boot counter AFTER successful init - failsafe only triggers
+            # if we crash before reaching this point
+            if rtc:
+                try:
+                    rtc.memory(b'0')
+                    print("Boot counter reset - startup successful")
+                except Exception as e:
+                    print(f"Boot counter reset failed (non-fatal): {e}")
+
+            # Run monitoring with watchdog feeding - no duration limit for 24/7 operation
+            fm.monitor(duration_sec=None, interval_sec=1, watchdog=wdt)
 
             # If we get here, monitoring completed normally
             print("Monitoring cycle complete, restarting...")
