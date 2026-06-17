@@ -35,7 +35,9 @@ address = "0.0.0.0:9000"
 # bug from the previous inline command (shell $$ vs $).
 [sources.bme680]
 type = "exec"
-command = ["/home/louthenw/sensor-pipeline/scripts/bme680-stream.sh"]
+# Path is inside the container; the scripts/ dir is bind-mounted
+# read-only from the host by vector.container (see Volume= line).
+command = ["/etc/vector/scripts/bme680-stream.sh"]
 mode = "streaming"
 
 # Vector Internal Metrics
