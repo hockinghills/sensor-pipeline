@@ -1,6 +1,9 @@
-#!/bin/bash
+#!/bin/sh
 # BME680 streaming reader - 10Hz (100ms intervals)
-# Outputs JSON with temp, pressure, humidity
+# Outputs JSON with temp, pressure, humidity.
+#
+# Uses POSIX sh so it runs in the alpine-based vector container
+# (no bash available there).
 #
 # BME_PATH can be overridden for testing (default = sysfs on Pi).
 BME_PATH="${BME_PATH:-/sys/bus/i2c/devices/1-0077/iio:device0}"

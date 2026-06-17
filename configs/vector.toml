@@ -353,9 +353,16 @@ method = "post"
 codec = "text"
 
 # Vector Internal Metrics → VictoriaMetrics
-# Prometheus remote write on VictoriaMetrics single-node lives at
-# /api/v1/prom/write, not /api/v1/write (which is the Influx-compat path).
+# VictoriaMetrics single-node accepts Prometheus remote write at
+# /prometheus/api/v1/write (snappy-compressed protobuf). /api/v1/write
+# and /api/v1/prom/write are 404 on this build of VM.
+# Healthcheck disabled: VM answers 204 No Content for the empty
+# probe write that vector sends on startup, which vector treats as
+# a failure (it expects 200). Real metric writes work fine.
 [sinks.vector_metrics]
 type = "prometheus_remote_write"
 inputs = ["vector_internal"]
-endpoint = "http://127.0.0.1:8428/api/v1/prom/write"
+endpoint = "http://127.0.0.1:8428/prometheus/api/v1/write"
+
+[sinks.vector_metrics.healthcheck]
+enabled = false
