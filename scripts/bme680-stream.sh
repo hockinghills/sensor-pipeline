@@ -1,8 +1,9 @@
 #!/bin/bash
 # BME680 streaming reader - 10Hz (100ms intervals)
 # Outputs JSON with temp, pressure, humidity
-
-BME_PATH="/sys/bus/i2c/devices/1-0077/iio:device0"
+#
+# BME_PATH can be overridden for testing (default = sysfs on Pi).
+BME_PATH="${BME_PATH:-/sys/bus/i2c/devices/1-0077/iio:device0}"
 
 while true; do
   temp=$(cat "$BME_PATH/in_temp_input" 2>/dev/null)

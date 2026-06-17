@@ -1,5 +1,8 @@
 # Vector Configuration for Sensor Pipeline
-# Primary data pipeline: ESP32 furnace → MQTT → VictoriaMetrics
+# Cleaned up: Dec 15, 2025
+# - All data via UDP (port 9000: ESP32-S3 multi-sensor, port 9001: furnace thermocouple)
+# - Split measurements: furnace, flame, control, pressure, recuperator, environment
+# - All temperatures in Celsius
 
 # =============================================================================
 # API - Observability and Health Checks
@@ -12,33 +15,43 @@ address = "127.0.0.1:8686"
 # SOURCES
 # =============================================================================
 
-# ESP32 Furnace Data via MQTT
-[sources.furnace_mqtt]
-type = "mqtt"
-host = "127.0.0.1"
-port = 1883
-topic = "furnace/data"
+# ESP32 Furnace Data via UDP (port 9001)
+# Thermocouple + cold junction from original ESP32
+[sources.furnace_udp]
+type = "socket"
+mode = "udp"
+address = "0.0.0.0:9001"
 
-# ESP32 Pressure Sensor via Serial (USB)
-[sources.pressure_serial]
-type = "exec"
-command = ["cat", "/dev/ttyACM0"]
-mode = "streaming"
+# ESP32-S3 Multi-sensor Data via UDP (port 9000)
+# Flame analysis, control signals, pressure, recuperator temps
+[sources.esp32s3_udp]
+type = "socket"
+mode = "udp"
+address = "0.0.0.0:9000"
 
 # BME680 Environmental Sensor - 10Hz streaming
+# Delegates to scripts/bme680-stream.sh so the loop is testable,
+# survives a sysfs glitch (skips empty reads), and doesn't repeat the
+# bug from the previous inline command (shell $$ vs $).
 [sources.bme680]
 type = "exec"
-command = ["sh", "-c", "while true; do t=$(cat /sys/bus/i2c/devices/1-0077/iio:device0/in_temp_input); p=$(cat /sys/bus/i2c/devices/1-0077/iio:device0/in_pressure_input); h=$(cat /sys/bus/i2c/devices/1-0077/iio:device0/in_humidityrelative_input); echo \"{\\\"temp\\\":$$t,\\\"pressure\\\":$$p,\\\"humidity\\\":$$h}\"; sleep 0.1; done"]
+command = ["/home/louthenw/sensor-pipeline/scripts/bme680-stream.sh"]
 mode = "streaming"
 
+# Vector Internal Metrics
+[sources.vector_internal]
+type = "internal_metrics"
+namespace = "vector"
+scrape_interval_secs = 15
+
 # =============================================================================
-# TRANSFORMS
+# TRANSFORMS - Parsing
 # =============================================================================
 
-# Parse furnace MQTT JSON data
+# Parse furnace UDP JSON data
 [transforms.parse_furnace]
 type = "remap"
-inputs = ["furnace_mqtt"]
+inputs = ["furnace_udp"]
 source = '''
 parsed, err = parse_json(.message)
 if err != null {
@@ -49,17 +62,90 @@ if err != null {
 .host = "piiot"
 '''
 
-# Parse pressure sensor JSON from ESP32 serial
-[transforms.parse_pressure]
+# Parse ESP32-S3 multi-sensor data and route to appropriate measurements
+[transforms.parse_esp32s3]
 type = "remap"
-inputs = ["pressure_serial"]
+inputs = ["esp32s3_udp"]
 source = '''
-# Try to parse JSON, skip non-JSON lines
 parsed, err = parse_json(.message)
 if err != null {
   abort
 }
 . = parsed
+.host = "piiot"
+'''
+
+# Route ESP32-S3 data to separate measurements based on content
+[transforms.route_esp32s3]
+type = "route"
+inputs = ["parse_esp32s3"]
+[transforms.route_esp32s3.route]
+flame = 'exists(.flame)'
+control = 'exists(.control)'
+pressure = 'exists(.pressure)'
+recuperator = 'exists(.recuperator)'
+
+# Extract flame analysis data
+[transforms.flame_data]
+type = "remap"
+inputs = ["route_esp32s3.flame"]
+source = '''
+.measurement = "flame"
+.flame_status = .flame.status
+.flicker_freq = .flame.flicker_freq
+.flicker_mag = .flame.flicker_mag
+.thermo_freq = .flame.thermo_freq
+.thermo_mag = .flame.thermo_mag
+.flame_rms = .flame.rms
+del(.flame)
+'''
+
+# Extract burner control signals
+[transforms.control_data]
+type = "remap"
+inputs = ["route_esp32s3.control"]
+source = '''
+.measurement = "control"
+.voltage = .control.voltage
+.percent = .control.percent
+.milliamps = .control.milliamps
+del(.control)
+'''
+
+# Extract pressure sensor data
+[transforms.pressure_data]
+type = "remap"
+inputs = ["route_esp32s3.pressure"]
+source = '''
+.measurement = "pressure"
+.sensor1_psi = .pressure.sensor1_psi
+.sensor2_psi = .pressure.sensor2_psi
+# Track validity - null indicates sensor fault
+.sensor1_valid = is_float(.sensor1_psi)
+.sensor2_valid = is_float(.sensor2_psi)
+del(.pressure)
+'''
+
+# Extract recuperator (heat recovery) temperatures
+[transforms.recuperator_data]
+type = "remap"
+inputs = ["route_esp32s3.recuperator"]
+source = '''
+.measurement = "recuperator"
+# Firmware sends Celsius (field names are lies)
+# Preheat = combustion air going to burner
+# Exhaust = flue gas temperature
+# Tolerate bad/missing/non-numeric values: if to_float errors we just
+# drop the field rather than abort the whole message.
+.preheat, err1 = to_float(.recuperator.top_f)
+if err1 != null { del(.preheat) }
+
+.exhaust, err2 = to_float(.recuperator.bottom_f)
+if err2 != null { del(.exhaust) }
+
+del(.recuperator)
+del(.err1)
+del(.err2)
 '''
 
 # Parse BME680 JSON readings
@@ -74,6 +160,7 @@ if err != null {
 
 .measurement = "environment"
 .host = "piiot"
+# BME680 returns millidegrees/millibars, convert to standard units
 .temperature = to_float!(parsed.temp) / 1000.0
 .pressure = to_float!(parsed.pressure) / 1000.0
 .humidity = to_float!(parsed.humidity) / 1000.0
@@ -82,38 +169,146 @@ del(.message)
 '''
 
 # =============================================================================
-# TRANSFORMS - ILP Formatting for QuestDB
+# TRANSFORMS - ILP Formatting
 # =============================================================================
 
-# Format furnace data as InfluxDB Line Protocol
+# Format furnace data as ILP
 [transforms.furnace_to_ilp]
 type = "remap"
 inputs = ["parse_furnace"]
 source = '''
-# Build ILP line: measurement,tags fields timestamp
-# furnace,host=piiot temp_f=2320.5,flame_v=7.2,... timestamp_ns
-
 fields = []
 tags = "host=" + (string(.host) ?? "unknown")
 
-# Add all numeric fields (match ESP32 JSON field names)
-# Note: pressure moved to separate ESP32-S3 via serial
-if exists(.furnace_temp) { fields = push(fields, "furnace_temp=" + to_string!(.furnace_temp)) }
-if exists(.cold_junction) { fields = push(fields, "cold_junction=" + to_string!(.cold_junction)) }
-if exists(.flame_voltage) { fields = push(fields, "flame_voltage=" + to_string!(.flame_voltage)) }
-if exists(.heap_bytes) { fields = push(fields, "heap_bytes=" + to_string!(.heap_bytes) + "i") }
+# All temps in Celsius
+if exists(.furnace_temp) { fields = push(fields, "temp=" + to_string!(.furnace_temp)) }
+if exists(.cold_junction) && .cold_junction != null {
+  fields = push(fields, "cold_junction=" + to_string!(.cold_junction))
+}
 
 if length(fields) == 0 {
   abort
 }
 
-# Nanosecond timestamp
-ts = to_unix_timestamp(now(), unit: "nanoseconds")
-
+# Prefer sensor-provided Unix timestamp (seconds, float/int) so we
+# record when the reading was actually taken, not when Vector got it.
+ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  to_int(to_float!(.timestamp) * 1_000_000_000.0)
+} else {
+  to_unix_timestamp(now(), unit: "nanoseconds")
+}
 .message = "furnace," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
 
-# Format BME680 data as InfluxDB Line Protocol
+# Format flame data as ILP
+[transforms.flame_to_ilp]
+type = "remap"
+inputs = ["flame_data"]
+source = '''
+fields = []
+tags = "host=" + (string(.host) ?? "unknown")
+
+if exists(.flame_status) { tags = tags + ",status=" + to_string!(.flame_status) }
+if exists(.flicker_freq) { fields = push(fields, "flicker_freq=" + to_string!(.flicker_freq)) }
+if exists(.flicker_mag) { fields = push(fields, "flicker_mag=" + to_string!(.flicker_mag)) }
+if exists(.thermo_freq) { fields = push(fields, "thermo_freq=" + to_string!(.thermo_freq)) }
+if exists(.thermo_mag) { fields = push(fields, "thermo_mag=" + to_string!(.thermo_mag)) }
+if exists(.flame_rms) { fields = push(fields, "rms=" + to_string!(.flame_rms)) }
+
+if length(fields) == 0 {
+  abort
+}
+
+ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  to_int(to_float!(.timestamp) * 1_000_000_000.0)
+} else {
+  to_unix_timestamp(now(), unit: "nanoseconds")
+}
+.message = "flame," + tags + " " + join!(fields, ",") + " " + to_string(ts)
+'''
+
+# Format control data as ILP
+[transforms.control_to_ilp]
+type = "remap"
+inputs = ["control_data"]
+source = '''
+fields = []
+tags = "host=" + (string(.host) ?? "unknown")
+
+if exists(.voltage) { fields = push(fields, "voltage=" + to_string!(.voltage)) }
+if exists(.percent) { fields = push(fields, "percent=" + to_string!(.percent)) }
+if exists(.milliamps) { fields = push(fields, "milliamps=" + to_string!(.milliamps)) }
+
+if length(fields) == 0 {
+  abort
+}
+
+ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  to_int(to_float!(.timestamp) * 1_000_000_000.0)
+} else {
+  to_unix_timestamp(now(), unit: "nanoseconds")
+}
+.message = "control," + tags + " " + join!(fields, ",") + " " + to_string(ts)
+'''
+
+# Format pressure data as ILP
+[transforms.pressure_to_ilp]
+type = "remap"
+inputs = ["pressure_data"]
+source = '''
+fields = []
+tags = "host=" + (string(.host) ?? "unknown")
+
+if exists(.sensor1_psi) && is_float(.sensor1_psi) {
+  fields = push(fields, "sensor1_psi=" + to_string!(.sensor1_psi))
+  fields = push(fields, "sensor1_valid=1i")
+} else {
+  fields = push(fields, "sensor1_valid=0i")
+}
+
+if exists(.sensor2_psi) && is_float(.sensor2_psi) {
+  fields = push(fields, "sensor2_psi=" + to_string!(.sensor2_psi))
+  fields = push(fields, "sensor2_valid=1i")
+} else {
+  fields = push(fields, "sensor2_valid=0i")
+}
+
+# Note: fields will always contain at least the *_valid flags, so we
+# always emit a row (including during a fault) so downstream alerts can
+# distinguish "sensor dead" from "no data at all".
+
+ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  to_int(to_float!(.timestamp) * 1_000_000_000.0)
+} else {
+  to_unix_timestamp(now(), unit: "nanoseconds")
+}
+.message = "pressure," + tags + " " + join!(fields, ",") + " " + to_string(ts)
+'''
+
+# Format recuperator data as ILP
+[transforms.recuperator_to_ilp]
+type = "remap"
+inputs = ["recuperator_data"]
+source = '''
+fields = []
+tags = "host=" + (string(.host) ?? "unknown")
+
+if exists(.preheat) { fields = push(fields, "preheat=" + to_string!(.preheat)) }
+if exists(.exhaust) { fields = push(fields, "exhaust=" + to_string!(.exhaust)) }
+
+if length(fields) == 0 {
+  abort
+}
+
+ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  to_int(to_float!(.timestamp) * 1_000_000_000.0)
+} else {
+  to_unix_timestamp(now(), unit: "nanoseconds")
+}
+.message = "recuperator," + tags + " " + join!(fields, ",") + " " + to_string(ts)
+'''
+
+# Format BME680 data as ILP
 [transforms.bme680_to_ilp]
 type = "remap"
 inputs = ["parse_bme680"]
@@ -129,46 +324,36 @@ if length(fields) == 0 {
   abort
 }
 
+# BME680 exec source has no sensor timestamp - fall back to now().
 ts = to_unix_timestamp(now(), unit: "nanoseconds")
-
 .message = "environment," + tags + " " + join!(fields, ",") + " " + to_string(ts)
-'''
-
-# Format pressure sensor data as ILP
-[transforms.pressure_to_ilp]
-type = "remap"
-inputs = ["parse_pressure"]
-source = '''
-fields = []
-tags = "host=piiot"
-
-# Pressure sensor fields from ESP32-S3 serial
-if exists(.pressure_inlet) { fields = push(fields, "pressure_inlet=" + to_string!(.pressure_inlet)) }
-if exists(.pressure_outlet) { fields = push(fields, "pressure_outlet=" + to_string!(.pressure_outlet)) }
-# Debug fields for calibration
-if exists(.inlet_v) { fields = push(fields, "inlet_v=" + to_string!(.inlet_v)) }
-if exists(.ref_v) { fields = push(fields, "ref_v=" + to_string!(.ref_v)) }
-if exists(.inlet_raw) { fields = push(fields, "inlet_raw=" + to_string!(.inlet_raw) + "i") }
-
-if length(fields) == 0 {
-  abort
-}
-
-ts = to_unix_timestamp(now(), unit: "nanoseconds")
-
-.message = "pressure," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
 
 # =============================================================================
 # SINKS
 # =============================================================================
 
-# VictoriaMetrics output via InfluxDB Line Protocol (HTTP)
+# VictoriaMetrics output via InfluxDB Line Protocol
 [sinks.victoriametrics]
 type = "http"
-inputs = ["furnace_to_ilp", "bme680_to_ilp", "pressure_to_ilp"]
+inputs = [
+  "furnace_to_ilp",
+  "flame_to_ilp",
+  "control_to_ilp",
+  "pressure_to_ilp",
+  "recuperator_to_ilp",
+  "bme680_to_ilp"
+]
 uri = "http://127.0.0.1:8428/write"
 method = "post"
 
 [sinks.victoriametrics.encoding]
 codec = "text"
+
+# Vector Internal Metrics → VictoriaMetrics
+# Prometheus remote write on VictoriaMetrics single-node lives at
+# /api/v1/prom/write, not /api/v1/write (which is the Influx-compat path).
+[sinks.vector_metrics]
+type = "prometheus_remote_write"
+inputs = ["vector_internal"]
+endpoint = "http://127.0.0.1:8428/api/v1/prom/write"
