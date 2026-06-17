@@ -194,10 +194,16 @@ if length(fields) == 0 {
 
 # Prefer sensor-provided Unix timestamp (seconds, float/int) so we
 # record when the reading was actually taken, not when Vector got it.
-ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
-  to_int(to_float!(.timestamp) * 1_000_000_000.0)
-} else {
-  to_unix_timestamp(now(), unit: "nanoseconds")
+# Sanity check: reject sensor ts more than 7 days off now(). Catches
+# mis-formatted fields (e.g. uptime counters, ms-since-boot) that would
+# produce absurdly-future timestamps VM rejects with "too big timestamp".
+now_ns = to_unix_timestamp(now(), unit: "nanoseconds")
+ts = now_ns
+if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  sensor_ns = to_int(to_float!(.timestamp) * 1_000_000_000.0)
+  if abs(sensor_ns - now_ns) < 604_800_000_000_000 {
+    ts = sensor_ns
+  }
 }
 .message = "furnace," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
@@ -221,10 +227,14 @@ if length(fields) == 0 {
   abort
 }
 
-ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
-  to_int(to_float!(.timestamp) * 1_000_000_000.0)
-} else {
-  to_unix_timestamp(now(), unit: "nanoseconds")
+# Sanity-checked sensor timestamp (see furnace_to_ilp for rationale).
+now_ns = to_unix_timestamp(now(), unit: "nanoseconds")
+ts = now_ns
+if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  sensor_ns = to_int(to_float!(.timestamp) * 1_000_000_000.0)
+  if abs(sensor_ns - now_ns) < 604_800_000_000_000 {
+    ts = sensor_ns
+  }
 }
 .message = "flame," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
@@ -245,10 +255,14 @@ if length(fields) == 0 {
   abort
 }
 
-ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
-  to_int(to_float!(.timestamp) * 1_000_000_000.0)
-} else {
-  to_unix_timestamp(now(), unit: "nanoseconds")
+# Sanity-checked sensor timestamp (see furnace_to_ilp for rationale).
+now_ns = to_unix_timestamp(now(), unit: "nanoseconds")
+ts = now_ns
+if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  sensor_ns = to_int(to_float!(.timestamp) * 1_000_000_000.0)
+  if abs(sensor_ns - now_ns) < 604_800_000_000_000 {
+    ts = sensor_ns
+  }
 }
 .message = "control," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
@@ -279,10 +293,14 @@ if exists(.sensor2_psi) && is_float(.sensor2_psi) {
 # always emit a row (including during a fault) so downstream alerts can
 # distinguish "sensor dead" from "no data at all".
 
-ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
-  to_int(to_float!(.timestamp) * 1_000_000_000.0)
-} else {
-  to_unix_timestamp(now(), unit: "nanoseconds")
+# Sanity-checked sensor timestamp (see furnace_to_ilp for rationale).
+now_ns = to_unix_timestamp(now(), unit: "nanoseconds")
+ts = now_ns
+if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  sensor_ns = to_int(to_float!(.timestamp) * 1_000_000_000.0)
+  if abs(sensor_ns - now_ns) < 604_800_000_000_000 {
+    ts = sensor_ns
+  }
 }
 .message = "pressure," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
@@ -302,10 +320,14 @@ if length(fields) == 0 {
   abort
 }
 
-ts = if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
-  to_int(to_float!(.timestamp) * 1_000_000_000.0)
-} else {
-  to_unix_timestamp(now(), unit: "nanoseconds")
+# Sanity-checked sensor timestamp (see furnace_to_ilp for rationale).
+now_ns = to_unix_timestamp(now(), unit: "nanoseconds")
+ts = now_ns
+if exists(.timestamp) && (is_float(.timestamp) || is_integer(.timestamp)) {
+  sensor_ns = to_int(to_float!(.timestamp) * 1_000_000_000.0)
+  if abs(sensor_ns - now_ns) < 604_800_000_000_000 {
+    ts = sensor_ns
+  }
 }
 .message = "recuperator," + tags + " " + join!(fields, ",") + " " + to_string(ts)
 '''
