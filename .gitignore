@@ -1,5 +1,8 @@
 # Ignore sensitive files
 configs/influxdb_token.txt
+firmware/micropython/config.py
+firmware/micropython/secrets.py
+firmware/micropython/webrepl_cfg.py
 *.log
 *.pid
 
@@ -22,4 +25,4 @@ Thumbs.db
 *.swo
 *~
 .vscode/
-.idea/
+.idea/firmware/arduinocc/arduino_secrets.h

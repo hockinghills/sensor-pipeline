@@ -1,0 +1,3 @@
+# WebREPL configuration
+# Copy to webrepl_cfg.py and set your password (4-9 characters)
+PASS = 'CHANGEME'
