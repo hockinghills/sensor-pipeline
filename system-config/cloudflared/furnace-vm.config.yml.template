@@ -1,0 +1,7 @@
+tunnel: <your-tunnel-id>
+credentials-file: /etc/cloudflared-furnace-vm/credentials.json
+
+ingress:
+  - hostname: furnace-origin.example.com
+    service: http://127.0.0.1:8428
+  - service: http_status:404
