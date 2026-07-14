@@ -220,8 +220,8 @@ def build_tune_advisor(include_series=True):
     flame_series = fetch_series("flame_rms", 3600, 30)
     inlet_series = fetch_series("pressure_sensor2_psi", 3600, 60)
     outlet_series = fetch_series("pressure_sensor1_psi", 3600, 60)
-    preheat_series = fetch_series("recuperator_preheat", 3600, 60)
-    exhaust_series = fetch_series("recuperator_exhaust", 3600, 60)
+    recup_top_series = fetch_series("recuperator_top", 3600, 60)
+    recup_bottom_series = fetch_series("recuperator_bottom", 3600, 60)
 
     now = time.time()
     temp_f = latest_value(temp_f_series)
@@ -252,8 +252,8 @@ def build_tune_advisor(include_series=True):
     flame_std_30 = safe_stdev(recent(flame_series, 1800))
     inlet = latest_value(inlet_series)
     outlet = latest_value(outlet_series)
-    preheat = latest_value(preheat_series)
-    exhaust = latest_value(exhaust_series)
+    recup_top = latest_value(recup_top_series)
+    recup_bottom = latest_value(recup_bottom_series)
     osc = oscillation_score(temp_f_series)
 
     distance_from_band = 0.0
@@ -384,8 +384,8 @@ def build_tune_advisor(include_series=True):
         {"label": "flame rms", "value": fmt_num(flame, 5)},
         {"label": "inlet psi", "value": fmt_num(inlet, 3)},
         {"label": "outlet psi", "value": fmt_num(outlet, 3)},
-        {"label": "preheat", "value": fmt_num(preheat, 1, " C")},
-        {"label": "exhaust", "value": fmt_num(exhaust, 1, " C")},
+        {"label": "recup top", "value": fmt_num(recup_top, 1, " F")},
+        {"label": "recup bottom", "value": fmt_num(recup_bottom, 1, " F")},
     ]
 
     body = {
@@ -401,8 +401,8 @@ def build_tune_advisor(include_series=True):
             "flame_rms": flame,
             "inlet_psi": inlet,
             "outlet_psi": outlet,
-            "preheat_c": preheat,
-            "exhaust_c": exhaust,
+            "recup_top_f": recup_top,
+            "recup_bottom_f": recup_bottom,
         },
         "advisor": {
             "state": state,

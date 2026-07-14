@@ -128,22 +128,20 @@ source = '''
 del(.pressure)
 '''
 
-# Extract recuperator (heat recovery) temperatures
+# Extract recuperator thermocouple temperatures (Fahrenheit)
 [transforms.recuperator_data]
 type = "remap"
 inputs = ["route_esp32s3.recuperator"]
 source = '''
 .measurement = "recuperator"
-# Firmware sends Celsius (field names are lies)
-# Preheat = combustion air going to burner
-# Exhaust = flue gas temperature
-# Tolerate bad/missing/non-numeric values: if to_float errors we just
-# drop the field rather than abort the whole message.
-.preheat, err1 = to_float(.recuperator.top_f)
-if err1 != null { del(.preheat) }
+# Firmware sends Fahrenheit - field names top_f/bottom_f are accurate.
+# top = top of recuperator stack (CS pin 15)
+# bottom = bottom of recuperator stack (CS pin 14)
+.top, err1 = to_float(.recuperator.top_f)
+if err1 != null { del(.top) }
 
-.exhaust, err2 = to_float(.recuperator.bottom_f)
-if err2 != null { del(.exhaust) }
+.bottom, err2 = to_float(.recuperator.bottom_f)
+if err2 != null { del(.bottom) }
 
 del(.recuperator)
 del(.err1)
@@ -313,8 +311,8 @@ source = '''
 fields = []
 tags = "host=" + (string(.host) ?? "unknown")
 
-if exists(.preheat) { fields = push(fields, "preheat=" + to_string!(.preheat)) }
-if exists(.exhaust) { fields = push(fields, "exhaust=" + to_string!(.exhaust)) }
+if exists(.top) { fields = push(fields, "top=" + to_string!(.top)) }
+if exists(.bottom) { fields = push(fields, "bottom=" + to_string!(.bottom)) }
 
 if length(fields) == 0 {
   abort
