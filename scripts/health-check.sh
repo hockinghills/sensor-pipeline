@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # IoT Pipeline Health Check Script
-# Verifies all components of the sensor data pipeline
+# Architecture: ESP32 (UDP) → Vector → VictoriaMetrics → Grafana Cloud
 
 # Color codes for output
 RED='\033[0;31m'
@@ -17,13 +17,8 @@ WARN="⚠"
 
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BLUE}  IoT Sensor Pipeline Health Check${NC}"
+echo -e "${BLUE}  ESP32 → UDP → Vector → VictoriaMetrics → Grafana Cloud${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-
-# Telegraf Failure Log
-echo -e "${BLUE}Telegraf Failure Log:${NC}"
-echo -e "  2025-11-14 22:00 - MQTT connection reset by peer"
-echo -e "  2025-11-15 01:06 - MQTT connection reset by peer"
 echo ""
 
 # Track overall health
@@ -31,7 +26,7 @@ ALL_HEALTHY=true
 
 # 1. Check systemd services
 echo -e "${BLUE}[1] Systemd Services${NC}"
-for service in hivemq influxdb telegraf vector; do
+for service in vector victoriametrics; do
     if systemctl --user is-active --quiet ${service}.service; then
         echo -e "  ${GREEN}${CHECK}${NC} ${service}.service - running"
     else
@@ -43,9 +38,9 @@ echo ""
 
 # 2. Check container status
 echo -e "${BLUE}[2] Container Status${NC}"
-for container in hivemq influxdb2 telegraf vector; do
+for container in vector victoriametrics; do
     if podman ps --format "{{.Names}}" | grep -q "^${container}$"; then
-        uptime=$(podman ps --filter "name=${container}" --format "{{.Status}}")
+        uptime=$(podman ps --filter "name=^${container}$" --format "{{.Status}}")
         echo -e "  ${GREEN}${CHECK}${NC} ${container} - ${uptime}"
     else
         echo -e "  ${RED}${CROSS}${NC} ${container} - ${RED}NOT RUNNING${NC}"
@@ -54,155 +49,169 @@ for container in hivemq influxdb2 telegraf vector; do
 done
 echo ""
 
-# 3. Check ESP32 MQTT data
-echo -e "${BLUE}[3] ESP32 MQTT Data Flow${NC}"
-MQTT_DATA=$(timeout 3 mosquitto_sub -h 127.0.0.1 -t 'furnace/data' -C 1 2>/dev/null)
-if [ $? -eq 0 ] && [ -n "$MQTT_DATA" ]; then
-    # Check if timestamp is recent (within last 2 minutes)
-    msg_timestamp=$(echo "$MQTT_DATA" | jq -r '.timestamp // 0' 2>/dev/null)
-    current_time=$(date +%s)
+# 3. Check Vector health & component throughput
+echo -e "${BLUE}[3] Vector Pipeline${NC}"
 
-    # Handle both seconds and milliseconds timestamps
-    if [ "$msg_timestamp" -gt 1000000000000 ] 2>/dev/null; then
-        # Milliseconds - convert to seconds
-        msg_time_sec=$((msg_timestamp / 1000))
-    else
-        msg_time_sec=$msg_timestamp
-    fi
-
-    time_diff=$((current_time - msg_time_sec))
-
-    if [ "$time_diff" -ge 0 ] && [ "$time_diff" -lt 120 ]; then
-        echo -e "  ${GREEN}${CHECK}${NC} ESP32 publishing to 'furnace/data'"
-    else
-        echo -e "  ${RED}${CROSS}${NC} ESP32 data is STALE (timestamp: ${msg_timestamp})"
-        echo -e "  ${YELLOW}  ESP32 may be offline or stuck in boot loop${NC}"
-        ALL_HEALTHY=false
-    fi
-
-    echo -e "  ${BLUE}  Latest data:${NC}"
-    echo "$MQTT_DATA"
+# Vector API health
+VECTOR_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8686/health 2>/dev/null)
+if [ "$VECTOR_HEALTH" = "200" ]; then
+    echo -e "  ${GREEN}${CHECK}${NC} Vector API healthy"
 else
-    echo -e "  ${RED}${CROSS}${NC} ESP32 MQTT data - ${RED}NO DATA${NC}"
+    echo -e "  ${RED}${CROSS}${NC} Vector API not responding (port 8686)"
+    ALL_HEALTHY=false
+fi
+
+# Use vector tap to check each data source (2s sample)
+echo -e "  ${BLUE}  Sampling live data (2s)...${NC}"
+
+# Furnace UDP (port 9001)
+FURNACE_TAP=$(podman exec vector vector tap --quiet --duration-ms 2000 --limit 1 --outputs-of furnace_udp 2>/dev/null | grep -v "INFO")
+if [ -n "$FURNACE_TAP" ]; then
+    FURNACE_TEMP=$(echo "$FURNACE_TAP" | python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        d = json.loads(line)
+        msg = d.get('message', '')
+        if 'furnace_temp' in str(d) or 'furnace_temp' in msg:
+            # Try parsing the message field if it's JSON
+            try:
+                inner = json.loads(msg)
+                print(f\"{inner.get('furnace_temp', 'N/A')}\")
+            except:
+                print(f\"{d.get('furnace_temp', 'N/A')}\")
+            break
+    except: pass
+" 2>/dev/null)
+    if [ -n "$FURNACE_TEMP" ] && [ "$FURNACE_TEMP" != "N/A" ]; then
+        FURNACE_F=$(python3 -c "print(f'{float($FURNACE_TEMP) * 9/5 + 32:.0f}')" 2>/dev/null)
+        echo -e "  ${GREEN}${CHECK}${NC} Furnace UDP (port 9001) - receiving data"
+        echo -e "      Furnace temp: ${FURNACE_TEMP}°C (${FURNACE_F}°F)"
+    else
+        echo -e "  ${GREEN}${CHECK}${NC} Furnace UDP (port 9001) - receiving data"
+    fi
+else
+    echo -e "  ${RED}${CROSS}${NC} Furnace UDP (port 9001) - ${RED}NO DATA${NC}"
     echo -e "  ${YELLOW}  Check if ESP32 is powered on and connected to WiFi${NC}"
     ALL_HEALTHY=false
 fi
 
-# Check ESP32 serial output
-if [ -e /dev/ttyUSB0 ]; then
-    echo -e "  ${BLUE}  Recent serial output:${NC}"
-    stty -F /dev/ttyUSB0 115200 2>/dev/null
-    SERIAL_OUT=$(timeout 2 cat /dev/ttyUSB0 2>/dev/null | head -10)
-    if [ -n "$SERIAL_OUT" ]; then
-        echo "$SERIAL_OUT" | sed 's/^/    /'
-    else
-        echo -e "    ${YELLOW}(no output)${NC}"
-    fi
+# ESP32-S3 UDP (port 9000)
+ESP32S3_TAP=$(podman exec vector vector tap --quiet --duration-ms 2000 --limit 1 --outputs-of esp32s3_udp 2>/dev/null | grep -v "INFO")
+if [ -n "$ESP32S3_TAP" ]; then
+    echo -e "  ${GREEN}${CHECK}${NC} ESP32-S3 UDP (port 9000) - receiving data"
+else
+    echo -e "  ${YELLOW}${WARN}${NC} ESP32-S3 UDP (port 9000) - no data in sample window"
 fi
-echo ""
 
-# 4. Check BME680 sensor
-echo -e "${BLUE}[4] BME680 Environmental Sensor${NC}"
-BME_PATH="/sys/bus/i2c/devices/1-0077/iio:device0"
-if [ -d "$BME_PATH" ]; then
-    echo -e "  ${GREEN}${CHECK}${NC} BME680 sensor detected on I2C"
-
-    # Read sensor values
-    if [ -r "$BME_PATH/in_temp_input" ]; then
-        temp_raw=$(cat "$BME_PATH/in_temp_input" 2>/dev/null)
-        temp_c=$(awk "BEGIN {printf \"%.2f\", $temp_raw/1000}")
-
-        pressure_raw=$(cat "$BME_PATH/in_pressure_input" 2>/dev/null)
-
-        humidity_raw=$(cat "$BME_PATH/in_humidityrelative_input" 2>/dev/null)
-
-        echo -e "  ${BLUE}  Current readings:${NC}"
-        echo -e "    • Temperature: ${temp_c}°C"
-        echo -e "    • Pressure: ${pressure_raw} kPa"
-        echo -e "    • Humidity: ${humidity_raw}%"
-    else
-        echo -e "  ${YELLOW}${WARN}${NC} BME680 detected but not readable"
-        ALL_HEALTHY=false
+# BME680 exec source
+BME680_TAP=$(podman exec vector vector tap --quiet --duration-ms 2000 --limit 1 --outputs-of bme680 2>/dev/null | grep -v "INFO")
+BME680_ERRORS=$(podman exec vector vector tap --quiet --duration-ms 2000 --limit 5 --inputs-of parse_bme680 2>/dev/null | grep -v "INFO" | grep "stderr" 2>/dev/null)
+if [ -n "$BME680_TAP" ]; then
+    echo -e "  ${GREEN}${CHECK}${NC} BME680 (sysfs exec) - receiving data"
+    if [ -n "$BME680_ERRORS" ]; then
+        echo -e "  ${YELLOW}${WARN}${NC} BME680 has read errors (some sysfs files may be missing)"
     fi
 else
-    echo -e "  ${RED}${CROSS}${NC} BME680 sensor - ${RED}NOT DETECTED${NC}"
-    echo -e "  ${YELLOW}  Run: sudo modprobe bme680_core && sudo modprobe bme680_i2c${NC}"
-    echo -e "  ${YELLOW}  Then: echo 'bme680 0x77' | sudo tee /sys/bus/i2c/devices/i2c-1/new_device${NC}"
+    echo -e "  ${RED}${CROSS}${NC} BME680 (sysfs exec) - ${RED}NO DATA${NC}"
+    echo -e "  ${YELLOW}  Kernel modules may need loading: sudo modprobe bme680_core bme680_i2c${NC}"
     ALL_HEALTHY=false
 fi
 echo ""
 
-# 5. Check Telegraf logs for errors
-echo -e "${BLUE}[5] Telegraf Status${NC}"
-TELEGRAF_ERRORS=$(podman logs --tail 50 telegraf 2>&1 | grep -c "E!")
-TELEGRAF_WARNINGS=$(podman logs --tail 50 telegraf 2>&1 | grep -E "W!.*output|W!.*flush|W!.*deadline|E!.*output|E!.*write" | wc -l)
-TELEGRAF_CONNECTED=$(podman logs --tail 20 telegraf 2>&1 | grep "Connected \[tcp://127.0.0.1:1883\]" | tail -1)
+# 4. Check VictoriaMetrics data flow
+echo -e "${BLUE}[4] VictoriaMetrics Data Flow${NC}"
 
-if [ -n "$TELEGRAF_CONNECTED" ]; then
-    echo -e "  ${GREEN}${CHECK}${NC} Telegraf connected to MQTT broker"
+VM_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8428/health 2>/dev/null)
+if [ "$VM_HEALTH" = "200" ]; then
+    echo -e "  ${GREEN}${CHECK}${NC} VictoriaMetrics API healthy (port 8428)"
 else
-    echo -e "  ${YELLOW}${WARN}${NC} Telegraf MQTT connection status unknown"
-fi
-
-# Check for output/write issues
-if [ "$TELEGRAF_WARNINGS" -gt 0 ]; then
-    echo -e "  ${RED}${CROSS}${NC} ${TELEGRAF_WARNINGS} output/write issue(s) detected"
-    echo -e "  ${YELLOW}  Run: podman logs telegraf | grep -E 'output|write|flush' | tail -10${NC}"
-    ALL_HEALTHY=false
-elif [ "$TELEGRAF_ERRORS" -eq 0 ]; then
-    echo -e "  ${GREEN}${CHECK}${NC} No recent errors in logs"
-elif [ "$TELEGRAF_ERRORS" -lt 5 ]; then
-    echo -e "  ${YELLOW}${WARN}${NC} ${TELEGRAF_ERRORS} error(s) in recent logs"
-    echo -e "  ${YELLOW}  Run: podman logs telegraf | grep 'E!' | tail -5${NC}"
-else
-    echo -e "  ${RED}${CROSS}${NC} ${TELEGRAF_ERRORS} errors in recent logs"
-    echo -e "  ${YELLOW}  Run: podman logs telegraf | grep 'E!' | tail -10${NC}"
+    echo -e "  ${RED}${CROSS}${NC} VictoriaMetrics API not responding (port 8428)"
     ALL_HEALTHY=false
 fi
 
-# CRITICAL: Verify data is actually being written to InfluxDB
-INFLUX_TOKEN="oxofnG-llFqgr8S5ZddcnI8DdqdbCkFn-2-svlyjD2YjKptM6tpvSDwv0VxNlyj1LhbH7Us1Tv_BEEmhCOxshQ=="
-RECENT_DATA=$(podman exec influxdb2 influx query 'from(bucket: "fucked") |> range(start: -2m) |> filter(fn: (r) => r._measurement == "furnace") |> count()' --org empyrean --token "$INFLUX_TOKEN" 2>/dev/null | grep -oP '\d+\s*$' | head -1 | tr -d ' ')
+# Check each measurement for recent data (last 2 minutes)
+MEASUREMENTS=("furnace_temp:Furnace temperature" "flame_rms:Flame sensor" "pressure_sensor1_psi:Pressure sensor" "recuperator_preheat:Recuperator" "control_voltage:Burner control")
 
-if [ -n "$RECENT_DATA" ] && [ "$RECENT_DATA" -gt 0 ]; then
-    echo -e "  ${GREEN}${CHECK}${NC} Data successfully writing to InfluxDB (${RECENT_DATA} points in last 2min)"
-else
-    echo -e "  ${RED}${CROSS}${NC} NO DATA written to InfluxDB in last 2 minutes!"
-    echo -e "  ${YELLOW}  This is a CRITICAL failure - data pipeline is broken${NC}"
-    ALL_HEALTHY=false
-fi
+for entry in "${MEASUREMENTS[@]}"; do
+    metric="${entry%%:*}"
+    label="${entry#*:}"
 
-# Check InfluxDB for error spam
-INFLUX_ERRORS=$(podman logs --tail 100 influxdb2 2>&1 | grep -c "Unauthorized\|authorization not found")
-if [ "$INFLUX_ERRORS" -gt 10 ]; then
-    echo -e "  ${RED}${CROSS}${NC} InfluxDB receiving ${INFLUX_ERRORS} unauthorized requests"
-    echo -e "  ${YELLOW}  Check Grafana Cloud data source authentication${NC}"
-    ALL_HEALTHY=false
-elif [ "$INFLUX_ERRORS" -gt 0 ]; then
-    echo -e "  ${YELLOW}${WARN}${NC} InfluxDB has ${INFLUX_ERRORS} authorization errors (may be transient)"
-fi
+    result=$(curl -s "http://127.0.0.1:8428/api/v1/query?query=${metric}" 2>/dev/null)
+    value=$(echo "$result" | python3 -c "
+import sys, json, time
+try:
+    d = json.load(sys.stdin)
+    results = d.get('data', {}).get('result', [])
+    if results:
+        ts = float(results[0]['value'][0])
+        val = results[0]['value'][1]
+        age = time.time() - ts
+        if age < 120:
+            print(f'OK|{val}|{age:.0f}')
+        else:
+            print(f'STALE|{val}|{age:.0f}')
+    else:
+        print('EMPTY||')
+except:
+    print('ERROR||')
+" 2>/dev/null)
 
+    status="${value%%|*}"
+    rest="${value#*|}"
+    val="${rest%%|*}"
+    age="${rest#*|}"
+
+    case "$status" in
+        OK)
+            echo -e "  ${GREEN}${CHECK}${NC} ${label} - ${val} (${age}s ago)"
+            ;;
+        STALE)
+            echo -e "  ${YELLOW}${WARN}${NC} ${label} - STALE data (${age}s ago, value: ${val})"
+            ALL_HEALTHY=false
+            ;;
+        EMPTY)
+            echo -e "  ${RED}${CROSS}${NC} ${label} - ${RED}NO DATA${NC}"
+            ALL_HEALTHY=false
+            ;;
+        *)
+            echo -e "  ${RED}${CROSS}${NC} ${label} - ${RED}QUERY ERROR${NC}"
+            ALL_HEALTHY=false
+            ;;
+    esac
+done
 echo ""
 
-# 6. Check port availability
-echo -e "${BLUE}[6] Network Ports${NC}"
-for port_info in "1883:HiveMQ MQTT" "8080:HiveMQ Web UI" "8086:InfluxDB API" "3000:Grafana UI"; do
+# 5. Network Ports
+echo -e "${BLUE}[5] Network Ports${NC}"
+for port_info in "9000:ESP32-S3 UDP" "9001:Furnace UDP" "8428:VictoriaMetrics API" "8686:Vector API"; do
     port="${port_info%%:*}"
     service="${port_info#*:}"
 
-    if timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/$port" 2>/dev/null; then
-        echo -e "  ${GREEN}${CHECK}${NC} Port ${port} (${service}) - listening"
+    # For UDP ports, check with ss; for TCP, check with /dev/tcp
+    if [[ "$service" == *"UDP"* ]]; then
+        if ss -uln 2>/dev/null | grep -q ":${port} "; then
+            echo -e "  ${GREEN}${CHECK}${NC} Port ${port} (${service}) - listening"
+        else
+            echo -e "  ${RED}${CROSS}${NC} Port ${port} (${service}) - ${RED}NOT LISTENING${NC}"
+            ALL_HEALTHY=false
+        fi
     else
-        echo -e "  ${RED}${CROSS}${NC} Port ${port} (${service}) - ${RED}NOT ACCESSIBLE${NC}"
-        ALL_HEALTHY=false
+        if timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+            echo -e "  ${GREEN}${CHECK}${NC} Port ${port} (${service}) - listening"
+        else
+            echo -e "  ${RED}${CROSS}${NC} Port ${port} (${service}) - ${RED}NOT ACCESSIBLE${NC}"
+            ALL_HEALTHY=false
+        fi
     fi
 done
 echo ""
 
-# 7. Check Tailscale connectivity
-echo -e "${BLUE}[7] Tailscale Network${NC}"
+# 6. Tailscale Network
+echo -e "${BLUE}[6] Tailscale Network${NC}"
 
-# Check if tailscale is running
 if ! command -v tailscale &> /dev/null; then
     echo -e "  ${RED}${CROSS}${NC} Tailscale - ${RED}NOT INSTALLED${NC}"
     ALL_HEALTHY=false
@@ -211,10 +220,8 @@ elif ! tailscale status &> /dev/null; then
     echo -e "  ${YELLOW}  Start with: sudo systemctl start tailscaled${NC}"
     ALL_HEALTHY=false
 else
-    # Check if tailscale is connected
     TS_STATUS=$(tailscale status --json 2>/dev/null)
     if [ $? -eq 0 ]; then
-        # Get Grafana Cloud connection status
         GRAFANA_PEERS=$(echo "$TS_STATUS" | jq -r '.Peer[] | select(.HostName | contains("grafanacloud")) | "\(.HostName):\(.Online)"' 2>/dev/null)
 
         if [ -n "$GRAFANA_PEERS" ]; then
@@ -224,15 +231,6 @@ else
             if [ "$GRAFANA_ONLINE" -gt 0 ]; then
                 echo -e "  ${GREEN}${CHECK}${NC} Tailscale connected"
                 echo -e "  ${GREEN}${CHECK}${NC} Grafana Cloud peers: ${GRAFANA_ONLINE}/${GRAFANA_TOTAL} online"
-
-                # Show which Grafana instances are connected
-                echo "$GRAFANA_PEERS" | while IFS=: read -r hostname status; do
-                    if [ "$status" = "true" ]; then
-                        echo -e "    • ${hostname} - ${GREEN}online${NC}"
-                    else
-                        echo -e "    • ${hostname} - ${YELLOW}offline${NC}"
-                    fi
-                done
             else
                 echo -e "  ${YELLOW}${WARN}${NC} Tailscale connected but no Grafana Cloud peers online"
                 echo -e "  ${YELLOW}  Grafana dashboards may not be accessible${NC}"
@@ -242,7 +240,6 @@ else
             echo -e "  ${YELLOW}${WARN}${NC} No Grafana Cloud peers found"
         fi
 
-        # Get this device's tailscale IP
         TS_IP=$(echo "$TS_STATUS" | jq -r '.Self.TailscaleIPs[0]' 2>/dev/null)
         if [ -n "$TS_IP" ] && [ "$TS_IP" != "null" ]; then
             echo -e "  ${BLUE}  This device (piiot): ${TS_IP}${NC}"
@@ -253,7 +250,27 @@ else
 fi
 echo ""
 
-# 8. Overall status
+# 7. Legacy services (should be stopped/removed)
+echo -e "${BLUE}[7] Legacy Services (should be removed)${NC}"
+LEGACY_FOUND=false
+for service in hivemq telegraf influxdb; do
+    if systemctl --user is-active --quiet ${service}.service 2>/dev/null; then
+        echo -e "  ${YELLOW}${WARN}${NC} ${service}.service is still running — no longer needed"
+        LEGACY_FOUND=true
+    fi
+done
+for container in hivemq telegraf influxdb2; do
+    if podman ps --format "{{.Names}}" 2>/dev/null | grep -q "^${container}$"; then
+        echo -e "  ${YELLOW}${WARN}${NC} ${container} container still running — no longer needed"
+        LEGACY_FOUND=true
+    fi
+done
+if [ "$LEGACY_FOUND" = false ]; then
+    echo -e "  ${GREEN}${CHECK}${NC} No legacy services running"
+fi
+echo ""
+
+# Overall status
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 if [ "$ALL_HEALTHY" = true ]; then
     echo -e "${GREEN}${CHECK} Overall Status: HEALTHY${NC}"
@@ -264,8 +281,10 @@ else
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "${YELLOW}Troubleshooting:${NC}"
-    echo -e "  • Check service logs: journalctl --user -u <service>.service"
-    echo -e "  • Check container logs: podman logs <container>"
-    echo -e "  • Restart services: systemctl --user restart telegraf.service"
+    echo -e "  • Service logs: journalctl --user -u <service>.service"
+    echo -e "  • Container logs: podman logs <container>"
+    echo -e "  • Live data: podman exec vector vector tap --quiet --duration-ms 5000"
+    echo -e "  • Component metrics: podman exec vector vector top"
+    echo -e "  • Restart: systemctl --user restart vector.service"
     exit 1
 fi
